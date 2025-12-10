@@ -59,7 +59,7 @@ def render_header():
         /* Sticky header bar */
         .rr-header {
             position: fixed;
-            top: 0;
+            top: 50px;
             left: 0;
             right: 0;
             height: 120px;
@@ -609,4 +609,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
