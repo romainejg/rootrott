@@ -157,6 +157,51 @@ def inject_css():
             color: #111827;
         }
 
+        /* ---------------------------------------- */
+        /* Force light theme + readable text       */
+        /* ---------------------------------------- */
+
+        html, body,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stVerticalBlock"],
+        [data-testid="stMarkdownContainer"] {
+            color: #111111 !important;
+            background-color: #ffffff !important;
+        }
+
+        /* Main text elements */
+        p, span, label, li, div {
+            color: #111111;
+        }
+
+        /* Sidebar text (including items in mobile menu) */
+        [data-testid="stSidebar"] * {
+            color: #111827 !important;
+        }
+
+        /* Links */
+        a {
+            color: #2563EB;
+        }
+        a:hover {
+            color: #1D4ED8;
+        }
+
+        /* Mobile tweaks */
+        @media (max-width: 768px) {
+            .rw-hero-hello {
+                font-size: 1.6rem;
+                margin-top: 4rem;
+            }
+            .rw-hero-name {
+                font-size: 2.2rem;
+            }
+            .rw-hero-intro {
+                font-size: 1.0rem;
+                line-height: 1.4;
+            }
+        }
+
         </style>
         """,
         unsafe_allow_html=True,
@@ -658,6 +703,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
