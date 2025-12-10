@@ -286,16 +286,49 @@ def render_home():
 
 def render_calculators():
     st.markdown("## Calculators")
+
+    st.subheader("Daily Light Integral (DLI)")
+
     st.markdown(
         """
-        Over time, _Calculators_ can host small, focused tools that help with everyday questions in the greenhouse —
-        from planning to crop steering.
+        Daily Light Integral (DLI) describes the total amount of photosynthetic light a crop
+        receives over a day.
 
-        This could include things like light planning, time-to-harvest estimates or simple rule-of-thumb checks.
-        For now, this area is intentionally open, a space to collect ideas from the teams using it.
+        This simple calculator uses:
+
+        - **PPFD** in µmol·m⁻²·s⁻¹  
+        - **Photoperiod** in hours  
+
+        and returns DLI in **mol·m⁻²·day⁻¹**.
         """
     )
-    st.info("If you have a specific calculator in mind, make a note of it – that helps decide what lands here first.")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        ppfd = st.number_input(
+            "Average PPFD (µmol·m⁻²·s⁻¹)",
+            min_value=0.0,
+            max_value=5000.0,
+            value=200.0,
+            step=10.0,
+        )
+
+    with col2:
+        hours = st.number_input(
+            "Photoperiod (hours per day)",
+            min_value=0.0,
+            max_value=24.0,
+            value=16.0,
+            step=0.5,
+        )
+
+    if ppfd > 0 and hours > 0:
+        dli = ppfd * hours * 3600 / 1_000_000  # mol·m⁻²·day⁻¹
+        st.markdown("### Result")
+        st.write(f"**DLI: {dli:.2f} mol·m⁻²·day⁻¹**")
+    else:
+        st.info("Enter a PPFD and photoperiod above zero to see the DLI.")
 
 
 # -----------------------
@@ -635,6 +668,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
