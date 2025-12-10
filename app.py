@@ -257,12 +257,12 @@ def render_home():
     st.markdown('<hr class="rw-divider">', unsafe_allow_html=True)
 
     # Bottom row: logo – contact – logo, all centered with similar heights
-    col_left, col_center, col_right = st.columns([1, 1.4, 1])
+    col_left, col_center, col_right = st.columns([2, 1.4, 1])
 
     with col_left:
         if os.path.exists(enza_path):
             try:
-                st.image(crop_and_fit_image(enza_path, 80), use_column_width=False)
+                st.image(crop_and_fit_image(enza_path, 40), use_column_width=False)
             except Exception:
                 pass
 
@@ -636,6 +636,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
