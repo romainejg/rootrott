@@ -288,52 +288,18 @@ def render_home():
 def render_calculators():
     st.markdown("## Calculators")
 
-    tab_dli, tab_vpd = st.tabs(["Daily Light Integral (DLI)", "Vapor Pressure Deficit (VPD)"])
+    tab_dli, tab_vpd, tab_density = st.tabs(
+        ["Daily Light Integral (DLI)", "Vapor Pressure Deficit (VPD)", "Plants per m²"]
+    )
 
-    # -----------------------
-    # DLI calculator
-    # -----------------------
     with tab_dli:
-        st.subheader("Daily Light Integral (DLI)")
+        calculators.DLICalculator.render()
 
-        st.markdown(
-            """
-            DLI describes the total amount of photosynthetically active light a crop
-            receives over a day, in **mol·m⁻²·day⁻¹**.
+    with tab_vpd:
+        calculators.VPDCalculator.render()
 
-            This calculator uses:
-
-            - **PPFD** in µmol·m⁻²·s⁻¹  
-            - **Photoperiod** in hours per day  
-            """
-        )
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            ppfd = st.number_input(
-                "Average PPFD (µmol·m⁻²·s⁻¹)",
-                min_value=0.0,
-                max_value=5000.0,
-                value=200.0,
-                step=10.0,
-            )
-
-        with col2:
-            hours = st.number_input(
-                "Photoperiod (hours per day)",
-                min_value=0.0,
-                max_value=24.0,
-                value=16.0,
-                step=0.5,
-            )
-
-        if ppfd > 0 and hours > 0:
-            dli = ppfd * hours * 3600 / 1_000_000  # mol·m⁻²·day⁻¹
-            st.markdown("### Result")
-            st.write(f"**DLI: {dli:.2f} mol·m⁻²·day⁻¹**")
-        else:
-            st.info("Enter PPFD and photoperiod above zero to see the DLI.")
+    with tab_density:
+        calculators.GutterPlantDensityCalculator.render()
 
     # -----------------------
     # VPD calculator
@@ -689,6 +655,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
