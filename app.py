@@ -355,8 +355,8 @@ def render_calculators():
 def render_calculators():
     st.markdown("## Calculators")
 
-    tab_dli, tab_vpd, tab_density = st.tabs(
-        ["Daily Light Integral (DLI)", "Vapor Pressure Deficit (VPD)", "Plants per m²"]
+    tab_dli, tab_vpd, tab_density, tab_units = st.tabs(
+        ["Daily Light Integral (DLI)", "Vapor Pressure Deficit (VPD)", "Plants per m²", "Unit Converter"]
     )
 
     with tab_dli:
@@ -367,6 +367,10 @@ def render_calculators():
 
     with tab_density:
         calculators.GutterPlantDensityCalculator.render()
+
+    with tab_units:
+        calculators.UnitConverterCalculator.render()
+
 
 
 # -----------------------
@@ -706,6 +710,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
