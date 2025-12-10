@@ -1,324 +1,190 @@
 import os
+from typing import List, Tuple, Optional
+
 import cv2
 import numpy as np
-from tkinter import Tk, ttk, filedialog, messagebox
-from tkinter.font import Font
-from PIL import Image, ImageTk
 from openpyxl import Workbook
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-class LeafAnalysisApp:
-    def __init__(self, root, back_callback):
-        self.root = root
-        self.back_callback = back_callback
-        self.images = []
-        self.filenames = []
-        self.current_image_index = 0
-        self.selected_objects = []
-        self.masks = []
-        self.current_mask_index = 0
-        self.folder_path = None
-        self.measurements = []
-        self.fig_canvas = None  # Initialize fig_canvas to None
-        self.show_options()
 
-    def show_options(self):
-        self.clear_root_widgets()
-        self.header_font = Font(family="Helvetica", size=28, weight="bold")
-        self.subtext_font = Font(family="Helvetica", size=16, slant="italic")
-        self.button_font = Font(family="Helvetica", size=16, weight="bold")
+# Type alias for readability: (x, y, w, h)
+BBox = Tuple[int, int, int, int]
 
-        frame = ttk.Frame(self.root, padding="20")
-        frame.pack(fill="both", expand=True)
 
-        header_label = ttk.Label(frame, text="Leaf Analysis", font=self.header_font)
-        header_label.pack(pady=10)
+def create_mask(image: np.ndarray, mask_type: int = 0) -> np.ndarray:
+    """
+    Create a binary mask for the leaf area using HSV and watershed.
+    `mask_type` is currently unused but kept for API compatibility.
+    """
+    # Convert image to HSV color space
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
-        subtext_label = ttk.Label(frame, text="Select an option below", font=self.subtext_font)
-        subtext_label.pack(pady=10)
+    # Define range for green color and create a binary mask
+    lower_green = np.array([0, 40, 50])
+    upper_green = np.array([80, 255, 255])
+    mask = cv2.inRange(hsv, lower_green, upper_green)
 
-        # Load and display logo image (e.g., a dog photo)
-        script_dir = os.path.dirname(os.path.abspath(__file__))  # Get the directory of the script
-        logo_path = os.path.join(script_dir, "logo.png")  # Construct the full path to the logo image
+    # Remove noise using morphological operations
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
 
-        try:
-            print(f"Loading logo image from {logo_path}")
-            logo_image = Image.open(logo_path)  # Load the logo image from the script directory
-            logo_image = logo_image.resize((300, 300), Image.LANCZOS)
-            logo_photo = ImageTk.PhotoImage(logo_image)
-            logo_label = ttk.Label(frame, image=logo_photo)
-            logo_label.image = logo_photo  # Keep a reference to avoid garbage collection
-            logo_label.pack(pady=20)
-        except Exception as e:
-            print(f"Error loading logo image: {e}")
+    # Distance transform
+    dist_transform = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
 
-        style = ttk.Style()
-        style.configure('TButton', font=self.button_font, padding=10)
+    # Threshold to obtain the sure foreground
+    _, sure_fg = cv2.threshold(dist_transform, 0.5 * dist_transform.max(), 255, 0)
+    sure_fg = np.uint8(sure_fg)
 
-        conduct_button = ttk.Button(frame, text="Conduct Analysis", command=self.select_folder_for_analysis, style='TButton')
-        conduct_button.pack(pady=10, fill="x")
+    # Sure background area
+    sure_bg = cv2.dilate(mask, kernel, iterations=3)
 
-        view_button = ttk.Button(frame, text="View Analysis", command=self.select_folder_for_viewing, style='TButton')
-        view_button.pack(pady=10, fill="x")
+    # Unknown region
+    unknown = cv2.subtract(sure_bg, sure_fg)
 
-        back_button = ttk.Button(frame, text="Back", command=self.back_callback, style='TButton')
-        back_button.pack(pady=10, fill="x")
+    # Marker labelling
+    _, markers = cv2.connectedComponents(sure_fg)
 
-    def select_folder_for_analysis(self):
-        folder_path = filedialog.askdirectory(title="Select Folder Containing Images")
-        if folder_path:
-            self.folder_path = folder_path
-            self.process_images(folder_path)
+    # Add one to all labels so that the sure background is not 0, but 1
+    markers = markers + 1
 
-    def select_folder_for_viewing(self):
-        folder_path = filedialog.askdirectory(title="Select Folder Containing Images")
-        if folder_path:
-            self.folder_path = folder_path
-            self.view_analysis_images(folder_path)
+    # Mark the unknown region with zero
+    markers[unknown == 255] = 0
 
-    def create_mask(self, image, mask_type=0):
-        # Convert image to HSV color space
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        
-        # Define range for green color and create a binary mask
-        lower_green = np.array([0, 40, 50])
-        upper_green = np.array([80, 255, 255])
-        mask = cv2.inRange(hsv, lower_green, upper_green)
-        
-        # Remove noise using morphological operations
-        kernel = np.ones((3, 3), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
-        
-        # Compute the exact Euclidean distance from every binary pixel to the nearest zero pixel
-        dist_transform = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
-        
-        # Threshold to obtain the sure foreground
-        ret, sure_fg = cv2.threshold(dist_transform, 0.5 * dist_transform.max(), 255, 0)
-        sure_fg = np.uint8(sure_fg)
-        
-        # Sure background area
-        sure_bg = cv2.dilate(mask, kernel, iterations=3)
-        
-        # Unknown region (where we are not sure whether it is foreground or background)
-        unknown = cv2.subtract(sure_bg, sure_fg)
-        
-        # Marker labelling
-        ret, markers = cv2.connectedComponents(sure_fg)
-        
-        # Add one to all labels so that the sure background is not 0, but 1
-        markers = markers + 1
-        
-        # Mark the region of unknown with zero
-        markers[unknown == 255] = 0
-        
-        # Apply watershed algorithm
-        markers = cv2.watershed(image, markers)
-        image[markers == -1] = [255, 0, 0]
-        
-        # Create the mask based on watershed result
-        mask = np.zeros_like(image[:, :, 0])
-        mask[markers > 1] = 255
-        
-        return mask
+    # Apply watershed algorithm
+    markers = cv2.watershed(image, markers)
+    image[markers == -1] = [255, 0, 0]
 
-    def measure_objects(self, mask):
-        contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-        measurements = []
-        for contour in contours:
-            x, y, w, h = cv2.boundingRect(contour)
-            if w * h > 50000:  # Only count objects larger than so many pixels
-                measurements.append((x, y, w, h))
-        return contours, measurements
+    # Create the mask based on watershed result
+    final_mask = np.zeros_like(image[:, :, 0])
+    final_mask[markers > 1] = 255
 
-    def calculate_pixels_per_cm(self, image):
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-        contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-        squares = []
-        for contour in contours:
-            x, y, w, h = cv2.boundingRect(contour)
-            if abs(w - h) < 10 and w * h > 1000:
-                squares.append((x, y, w, h))
-        if len(squares) < 20:
-            return None
-        areas = [w * h for _, _, w, h in squares]
-        median_area = np.median(areas)
-        squares = sorted(squares, key=lambda s: abs((s[2] * s[3]) - median_area))
-        squares = squares[:20]
-        average_area = np.mean([w * h for _, _, w, h in squares])
-        pixels_per_cm2 = average_area
-        return pixels_per_cm2
+    return final_mask
 
-    def process_images(self, folder_path):
-        workbook_path = os.path.join(folder_path, "measurements.xlsx")
-        self.workbook = Workbook()
-        self.sheet = self.workbook.active
-        self.sheet.append(["Filename", "Object", "Width (cm)", "Height (cm)"])
 
-        for filename in os.listdir(folder_path):
-            if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-                image_path = os.path.join(folder_path, filename)
-                image = cv2.imread(image_path)
-                if image is None:
-                    continue
-                pixels_per_cm2 = self.calculate_pixels_per_cm(image)
-                if pixels_per_cm2 is None:
-                    print(f"Could not determine pixels per cm for {filename}")
-                    continue
-                mask = self.create_mask(image)
-                contours, measurements = self.measure_objects(mask)
-                x_locations = [x + w // 2 for x, y, w, h in measurements]
-                median_x = np.median(x_locations)
-                valid_measurements = []
-                for x, y, w, h in measurements:
-                    center_x = x + w // 2
-                    close_count = sum(1 for xx in x_locations if abs(center_x - xx) < 10 * np.sqrt(pixels_per_cm2))
-                    if close_count >= 3:
-                        valid_measurements.append((x, y, w, h))
-                for i, (x, y, w, h) in enumerate(valid_measurements):
-                    width_cm = round(w / np.sqrt(pixels_per_cm2), 1)
-                    height_cm = round(h / np.sqrt(pixels_per_cm2), 1)
-                    self.sheet.append([filename, i + 1, width_cm, height_cm])
+def measure_objects(mask: np.ndarray, min_area: int = 50000) -> Tuple[List[np.ndarray], List[BBox]]:
+    """
+    Find contours and bounding boxes for objects in the mask.
+    Only keeps objects with area > min_area.
+    """
+    contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    measurements: List[BBox] = []
 
-        self.workbook.save(workbook_path)
-        messagebox.showinfo("Success", f"Analysis complete. Measurements saved to {workbook_path}")
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if w * h > min_area:
+            measurements.append((x, y, w, h))
 
-    def view_analysis_images(self, folder_path):
-        self.clear_root_widgets()
-        self.images = []
-        self.filenames = []
-        self.current_image_index = 0
-        for filename in os.listdir(folder_path):
-            if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-                image_path = os.path.join(folder_path, filename)
-                image = cv2.imread(image_path)
-                if image is not None:
-                    self.images.append(image)
-                    self.filenames.append(filename)
-        if not self.images:
-            messagebox.showinfo("Info", "No images found in the selected folder.")
-            self.show_options()
-            return
-        self.show_image_for_selection()
+    return contours, measurements
 
-    def show_image_for_selection(self):
-        if self.current_image_index >= len(self.images):
-            messagebox.showinfo("Info", "All images reviewed.")
-            self.show_options()
-            return
 
-        self.clear_root_widgets()
+def calculate_pixels_per_cm(image: np.ndarray) -> Optional[float]:
+    """
+    Estimate pixels per cm² using square-like objects in the image.
+    Returns pixels_per_cm² or None if it cannot be determined.
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+    contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-        # Display the image title at the top
-        title_frame = ttk.Frame(self.root, padding="10")
-        title_frame.pack(fill="x")
-        image_title = ttk.Label(title_frame, text=self.filenames[self.current_image_index], font=("Helvetica", 16, "bold"))
-        image_title.pack(pady=5)
+    squares: List[BBox] = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if abs(w - h) < 10 and w * h > 1000:
+            squares.append((x, y, w, h))
 
-        image = self.images[self.current_image_index]
-        mask = self.create_mask(image, self.current_mask_index)
-        contours, self.measurements = self.measure_objects(mask)
-        self.selected_objects = list(range(len(self.measurements)))
+    # Need enough squares to get a reliable estimate
+    if len(squares) < 20:
+        return None
 
-        self.image_with_boxes = image.copy()
-        self.fig, self.axes = plt.subplots(1, 2, figsize=(12, 6))
-        self.fig_canvas = FigureCanvasTkAgg(self.fig, master=self.root)  # Initialize fig_canvas here
-        self.fig_canvas.draw()
-        self.fig_canvas.get_tk_widget().pack(fill='both', expand=True)
+    areas = [w * h for _, _, w, h in squares]
+    median_area = np.median(areas)
 
-        self.update_plot()
+    # Choose squares closest to the median area
+    squares = sorted(squares, key=lambda s: abs((s[2] * s[3]) - median_area))
+    squares = squares[:20]
 
-        self.fig_canvas.mpl_connect('button_press_event', self.on_click)
+    average_area = np.mean([w * h for _, _, w, h in squares])
+    pixels_per_cm2 = average_area
+    return float(pixels_per_cm2)
 
-        self.plot_button_controls()
 
-    def on_click(self, event):
-        if event.inaxes == self.axes[0]:
-            for idx, (x, y, w, h) in enumerate(self.measurements):
-                if x <= event.xdata <= x + w and y <= event.ydata <= y + h:
-                    if idx in self.selected_objects:
-                        self.selected_objects.remove(idx)
-                    else:
-                        self.selected_objects.append(idx)
-                    self.update_plot()
-                    break
+def analyze_image(image: np.ndarray, pixels_per_cm2: Optional[float] = None) -> Tuple[np.ndarray, List[BBox], float]:
+    """
+    Analyze a single image:
+    - create mask
+    - measure objects
+    - compute or use provided pixels_per_cm²
 
-    def update_plot(self):
-        self.axes[0].clear()
-        self.axes[1].clear()
-        self.axes[0].imshow(cv2.cvtColor(self.image_with_boxes, cv2.COLOR_BGR2RGB))
-        self.axes[1].imshow(self.create_mask(self.image_with_boxes, self.current_mask_index), cmap='gray')
-
-        for i, (x, y, w, h) in enumerate(self.measurements):
-            color = 'green' if i in self.selected_objects else 'red'
-            rect = plt.Rectangle((x, y), w, h, linewidth=2, edgecolor=color, facecolor='none')
-            self.axes[0].add_patch(rect)
-            self.axes[0].text(x, y, str(i + 1), fontsize=12, color=color, weight='bold', backgroundcolor='none')
-
-        self.axes[0].set_title('Original Image with Objects')
-        self.axes[0].axis('off')
-        self.axes[1].set_title('Mask Image')
-        self.axes[1].axis('off')
-        self.fig_canvas.draw()
-
-    def plot_button_controls(self):
-        button_frame = ttk.Frame(self.root)
-        button_frame.pack(pady=10)
-
-        save_button = ttk.Button(button_frame, text="Objects Selected", command=self.save_selected_objects, style='TButton')
-        save_button.pack(pady=10, side="left")
-
-        back_button = ttk.Button(button_frame, text="Back", command=self.back_callback, style='TButton')
-        back_button.pack(pady=10, side="left")
-
-        green_leaf_button = ttk.Button(button_frame, text="Green Leaf", command=lambda: self.apply_mask(0), style='TButton')
-        green_leaf_button.pack(pady=10, side="left")
-
-        red_leaf_button = ttk.Button(button_frame, text="Red Leaf", command=lambda: self.apply_mask(1), style='TButton')
-        red_leaf_button.pack(pady=10, side="left")
-
-        red_color_penetration_button = ttk.Button(button_frame, text="Red Color Penetration", command=lambda: self.apply_mask(2), style='TButton')
-        red_color_penetration_button.pack(pady=10, side="left")
-
-    def apply_mask(self, mask_index):
-        self.current_mask_index = mask_index
-        self.show_image_for_selection()
-
-    def save_selected_objects(self):
-        if not hasattr(self, 'workbook'):
-            self.workbook = Workbook()
-            self.sheet = self.workbook.active
-            self.sheet.append(["Filename", "Object", "Width (cm)", "Height (cm)"])
-
-        pixels_per_cm2 = self.calculate_pixels_per_cm(self.images[self.current_image_index])
+    Returns:
+        mask (np.ndarray): binary mask
+        measurements (List[BBox]): list of bounding boxes
+        pixels_per_cm2 (float): scale used (raises ValueError if cannot estimate)
+    """
+    if pixels_per_cm2 is None:
+        pixels_per_cm2 = calculate_pixels_per_cm(image)
         if pixels_per_cm2 is None:
-            print(f"Could not determine pixels per cm for {self.images[self.current_image_index]}")
-            return
-        
-        filename = self.filenames[self.current_image_index]
-        for idx in self.selected_objects:
-            x, y, w, h = self.measurements[idx]
+            raise ValueError("Could not determine pixels per cm² for this image.")
+
+    mask = create_mask(image)
+    _, measurements = measure_objects(mask)
+
+    return mask, measurements, pixels_per_cm2
+
+
+def analyze_folder(folder_path: str, output_filename: str = "measurements.xlsx") -> str:
+    """
+    Process all images in a folder, measure objects, and save results to an Excel file.
+
+    The logic is adapted from your original `process_images` method, but:
+    - No Tkinter / messagebox
+    - Returns the path to the saved workbook instead of showing a popup
+
+    Returns:
+        Path to the saved Excel file.
+    """
+    workbook_path = os.path.join(folder_path, output_filename)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Filename", "Object", "Width (cm)", "Height (cm)"])
+
+    for filename in os.listdir(folder_path):
+        if not filename.lower().endswith((".png", ".jpg", ".jpeg")):
+            continue
+
+        image_path = os.path.join(folder_path, filename)
+        image = cv2.imread(image_path)
+        if image is None:
+            print(f"Warning: could not read image {image_path}")
+            continue
+
+        pixels_per_cm2 = calculate_pixels_per_cm(image)
+        if pixels_per_cm2 is None:
+            print(f"Could not determine pixels per cm² for {filename}")
+            continue
+
+        mask = create_mask(image)
+        _, measurements = measure_objects(mask)
+
+        # Original logic: filter by x-location clustering
+        x_locations = [x + w // 2 for x, y, w, h in measurements]
+        if not x_locations:
+            continue
+
+        median_x = np.median(x_locations)
+
+        valid_measurements: List[BBox] = []
+        for x, y, w, h in measurements:
+            center_x = x + w // 2
+            close_count = sum(
+                1 for xx in x_locations if abs(center_x - xx) < 10 * np.sqrt(pixels_per_cm2)
+            )
+            if close_count >= 3:
+                valid_measurements.append((x, y, w, h))
+
+        for i, (x, y, w, h) in enumerate(valid_measurements):
             width_cm = round(w / np.sqrt(pixels_per_cm2), 1)
             height_cm = round(h / np.sqrt(pixels_per_cm2), 1)
-            self.sheet.append([filename, idx + 1, width_cm, height_cm])
+            sheet.append([filename, i + 1, width_cm, height_cm])
 
-        self.workbook.save(os.path.join(self.folder_path, "measurements.xlsx"))
-        self.show_next_image()
-
-    def show_next_image(self):
-        self.current_image_index += 1
-        self.show_image_for_selection()
-
-    def clear_root_widgets(self):
-        for widget in self.root.winfo_children():
-            widget.destroy()
-
-def main_interface(root, back_callback):
-    LeafAnalysisApp(root, back_callback)
-
-if __name__ == "__main__":
-    root = Tk()
-    app = LeafAnalysisApp(root, lambda: root.destroy())
-    root.mainloop()
+    workbook.save(workbook_path)
+    return workbook_path
