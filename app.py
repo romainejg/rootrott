@@ -169,7 +169,7 @@ def sidebar_nav():
     script_dir = get_script_dir()
     logo_path = os.path.join(script_dir, "logo.png")
 
-with st.sidebar:
+    with st.sidebar:
 
     # --- Large centered logo on top ---
     if os.path.exists(logo_path):
@@ -185,6 +185,17 @@ with st.sidebar:
             ),
             unsafe_allow_html=True,
         )
+
+    # --- Title + Subtitle ---
+    st.markdown(
+        '<div class="rw-sidebar-title" style="text-align:center; margin-top:10px;">ROOTWEILER</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        '<div class="rw-sidebar-subtitle" style="text-align:center;">Digital support for greenhouse teams.</div>',
+        unsafe_allow_html=True,
+    )
 
     # --- Title + Subtitle ---
     st.markdown(
