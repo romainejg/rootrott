@@ -243,12 +243,11 @@ def render_home():
         st.markdown('<div class="rw-hero-name">I’m Rootweiler.</div>', unsafe_allow_html=True)
         st.markdown(
             '<div class="rw-hero-intro">'
-            "A quiet, non-profit tool for people who live their days between crops, climate graphs and spreadsheets. "
-            "Rootweiler is a place to prototype small digital helpers for controlled environments – without turning "
-            "every idea into a full-scale project."
+            "A non-profit app for CEA leaders who live their days between crops, climate graphs, and spreadsheets. "
+            "Rootweiler is a place to find digital tools that assist with work in controlled environments."
             "<br><br>"
-            "Right now it’s just a sketch: a few sections to explore **Calculators, Climate, Phenotyping, Data & Graphs, "
-            "and Imaging**. The shape of it will come from the growers, breeders and agronomists who try it."
+            "Right now we're still in development, but there are a few sections to explore from the sidebar (Calculators, Climate, Phenotyping, Data & Graphs, "
+            "and Imaging)."
             "</div>",
             unsafe_allow_html=True,
         )
@@ -257,7 +256,7 @@ def render_home():
     st.markdown('<hr class="rw-divider">', unsafe_allow_html=True)
 
     # Bottom row: logo – contact – logo, all centered with similar heights
-    col_left, col_center, col_right = st.columns([2, 1.4, 1])
+    col_left, col_center, col_right = st.columns([.5, 1.4, 1])
 
     with col_left:
         if os.path.exists(enza_path):
@@ -636,6 +635,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
