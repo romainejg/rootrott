@@ -7,6 +7,7 @@ from PIL import Image
 import numpy as np
 import pandas as pd
 import cv2
+import base64
 
 import leafAnalysis
 import jpgExtract
@@ -634,6 +635,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
