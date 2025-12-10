@@ -1,2 +1,10 @@
 streamlit
+opencv-python-headless
+numpy
 Pillow
+matplotlib
+pandas
+openpyxl
+PyMuPDF
+python-docx
+python-pptx
