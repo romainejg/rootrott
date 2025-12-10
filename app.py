@@ -169,19 +169,33 @@ def sidebar_nav():
     script_dir = get_script_dir()
     logo_path = os.path.join(script_dir, "logo.png")
 
-    with st.sidebar:
-        cols = st.columns([1, 3])
-        with cols[0]:
-            if os.path.exists(logo_path):
-                # Larger icon for sidebar
-                logo_img = Image.open(logo_path).resize((200, 200), Image.LANCZOS)
-                st.image(logo_img, use_column_width=True)
-        with cols[1]:
-            st.markdown('<div class="rw-sidebar-title">ROOTWEILER</div>', unsafe_allow_html=True)
-            st.markdown(
-                '<div class="rw-sidebar-subtitle">Digital support for greenhouse teams.</div>',
-                unsafe_allow_html=True,
-            )
+with st.sidebar:
+
+    # --- Large centered logo on top ---
+    if os.path.exists(logo_path):
+        logo_img = Image.open(logo_path).resize((180, 180), Image.LANCZOS)
+
+        st.markdown(
+            """
+            <div style="display:flex; justify-content:center; margin-top:10px; margin-bottom:0px;">
+                <img src="data:image/png;base64,{}" style="width:180px; height:auto;" />
+            </div>
+            """.format(
+                base64.b64encode(open(logo_path, "rb").read()).decode()
+            ),
+            unsafe_allow_html=True,
+        )
+
+    # --- Title + Subtitle ---
+    st.markdown(
+        '<div class="rw-sidebar-title" style="text-align:center; margin-top:10px;">ROOTWEILER</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        '<div class="rw-sidebar-subtitle" style="text-align:center;">Digital support for greenhouse teams.</div>',
+        unsafe_allow_html=True,
+    )
 
         st.markdown("---")
 
@@ -622,6 +636,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
