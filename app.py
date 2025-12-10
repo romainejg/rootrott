@@ -223,7 +223,7 @@ def render_home():
     )
 
     # Hero: image left, text right
-    col_img, col_text = st.columns([1.1, 1.4])
+    col_img, col_text = st.columns([1, 1.4])
 
     with col_img:
         if os.path.exists(lettuce1):
@@ -256,14 +256,8 @@ def render_home():
     st.markdown('<hr class="rw-divider">', unsafe_allow_html=True)
 
     # Bottom row: logo – contact – logo, all centered with similar heights
-    col_left, col_center= st.columns([.1, .1])
+    col_center= st.columns([1])
 
-    with col_left:
-        if os.path.exists(logo_path):
-            try:
-                st.image(crop_and_fit_image(logo_path, 80), use_column_width=False)
-            except Exception:
-                pass
 
     with col_center:
         st.markdown('<div class="rw-contact-label">Contact</div>', unsafe_allow_html=True)
@@ -629,6 +623,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
