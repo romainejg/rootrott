@@ -296,3 +296,142 @@ class GutterPlantDensityCalculator:
                 st.write(f"Area per gutter (m²): `{area_per_gutter:.3f}`")
         else:
             st.info("Enter non-zero values for length, widths, spacing and plants per gutter to see the result.")
+
+class UnitConverterCalculator:
+    """
+    Generic unit converter for common greenhouse / agronomy-relevant quantities:
+    - Length
+    - Area
+    - Volume
+    - Mass
+    - Temperature
+    """
+
+    # Base-unit scaling factors for multiplicative conversions
+    LENGTH_FACTORS = {
+        "m": 1.0,
+        "cm": 0.01,
+        "mm": 0.001,
+        "ft": 0.3048,
+        "in": 0.0254,
+    }
+
+    AREA_FACTORS = {
+        "m²": 1.0,
+        "ft²": 0.09290304,
+        "ha": 10_000.0,
+        "acre": 4046.8564224,
+    }
+
+    VOLUME_FACTORS = {
+        "L": 0.001,           # 1 L = 0.001 m³
+        "m³": 1.0,
+        "gal (US)": 0.00378541,
+        "ft³": 0.0283168,
+    }
+
+    MASS_FACTORS = {
+        "g": 0.001,    # 1 g = 0.001 kg
+        "kg": 1.0,
+        "lb": 0.45359237,
+        "oz": 0.0283495231,
+    }
+
+    @staticmethod
+    def convert_length(value: float, from_unit: str, to_unit: str) -> float:
+        base = value * UnitConverterCalculator.LENGTH_FACTORS[from_unit]
+        return base / UnitConverterCalculator.LENGTH_FACTORS[to_unit]
+
+    @staticmethod
+    def convert_area(value: float, from_unit: str, to_unit: str) -> float:
+        base = value * UnitConverterCalculator.AREA_FACTORS[from_unit]
+        return base / UnitConverterCalculator.AREA_FACTORS[to_unit]
+
+    @staticmethod
+    def convert_volume(value: float, from_unit: str, to_unit: str) -> float:
+        base = value * UnitConverterCalculator.VOLUME_FACTORS[from_unit]
+        return base / UnitConverterCalculator.VOLUME_FACTORS[to_unit]
+
+    @staticmethod
+    def convert_mass(value: float, from_unit: str, to_unit: str) -> float:
+        base = value * UnitConverterCalculator.MASS_FACTORS[from_unit]
+        return base / UnitConverterCalculator.MASS_FACTORS[to_unit]
+
+    @staticmethod
+    def convert_temperature(value: float, from_unit: str, to_unit: str) -> float:
+        # Convert to °C first
+        if from_unit == "°C":
+            c = value
+        elif from_unit == "°F":
+            c = (value - 32.0) * 5.0 / 9.0
+        elif from_unit == "K":
+            c = value - 273.15
+        else:
+            c = value
+
+        # Convert from °C to target
+        if to_unit == "°C":
+            return c
+        elif to_unit == "°F":
+            return c * 9.0 / 5.0 + 32.0
+        elif to_unit == "K":
+            return c + 273.15
+        else:
+            return c
+
+    @classmethod
+    def render(cls):
+        st.subheader("Unit Converter")
+
+        st.markdown(
+            """
+            A small helper for converting common greenhouse and agronomy units.
+
+            Choose a quantity type, enter a value, and select the units to convert from and to.
+            """
+        )
+
+        quantity_type = st.selectbox(
+            "Quantity type",
+            ["Length", "Area", "Volume", "Mass", "Temperature"],
+            index=0,
+        )
+
+        if quantity_type == "Length":
+            units = list(cls.LENGTH_FACTORS.keys())
+        elif quantity_type == "Area":
+            units = list(cls.AREA_FACTORS.keys())
+        elif quantity_type == "Volume":
+            units = list(cls.VOLUME_FACTORS.keys())
+        elif quantity_type == "Mass":
+            units = list(cls.MASS_FACTORS.keys())
+        else:
+            units = ["°C", "°F", "K"]
+
+        col1, col2, col3 = st.columns([1, 1, 1.2])
+
+        with col1:
+            value = st.number_input("Value", value=1.0, step=0.1)
+
+        with col2:
+            from_unit = st.selectbox("From", units, index=0)
+
+        with col3:
+            to_unit = st.selectbox("To", units, index=min(1, len(units) - 1))
+
+        result = None
+        if quantity_type == "Length":
+            result = cls.convert_length(value, from_unit, to_unit)
+        elif quantity_type == "Area":
+            result = cls.convert_area(value, from_unit, to_unit)
+        elif quantity_type == "Volume":
+            result = cls.convert_volume(value, from_unit, to_unit)
+        elif quantity_type == "Mass":
+            result = cls.convert_mass(value, from_unit, to_unit)
+        elif quantity_type == "Temperature":
+            result = cls.convert_temperature(value, from_unit, to_unit)
+
+        if result is not None:
+            st.markdown("### Result")
+            st.write(f"**{value} {from_unit} = {result:.4g} {to_unit}**")
+
