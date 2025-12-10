@@ -256,7 +256,7 @@ def render_home():
     st.markdown('<hr class="rw-divider">', unsafe_allow_html=True)
 
     # Bottom row: logo – contact – logo, all centered with similar heights
-    col_center = st.column([1])
+    _,col_center,_ = st.columns([1,1,1])
 
     with col_center:
         st.markdown('<div class="rw-contact-label">Contact</div>', unsafe_allow_html=True)
@@ -622,6 +622,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
