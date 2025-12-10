@@ -62,7 +62,7 @@ def render_header():
             top: 0;
             left: 0;
             right: 0;
-            height: 64px;
+            height: 120px;
             background: #111111;
             color: #ffffff;
             display: flex;
@@ -609,3 +609,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
