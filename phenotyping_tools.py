@@ -2,7 +2,8 @@
 
 import io
 import os
-import json 
+import base64
+import requests # standard library for API calls
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict
 
@@ -10,7 +11,6 @@ import cv2
 import numpy as np
 import pandas as pd
 import streamlit as st
-from inference_sdk import InferenceHTTPClient
 from PIL import Image
 
 # ---------------------------------------------------------------------
@@ -82,127 +82,86 @@ def _overlay_grid_boxes(image_bgr: np.ndarray, boxes: List[Tuple[int, int, int, 
 
 
 # ---------------------------------------------------------------------
-# Roboflow workflow wrapper (DEBUG VERSION)
+# Roboflow workflow wrapper (DIRECT HTTP VERSION)
 # ---------------------------------------------------------------------
-# phenotyping_tools.py (Only the function _run_roboflow_workflow is shown with the final fix)
-
 @st.cache_data(show_spinner="Running Roboflow segmentation workflow...")
 def _run_roboflow_workflow(image_bytes: bytes) -> Tuple[Optional[Dict[str, object]], bool]:
     """
-    Call the Roboflow workflow 'leafy' with extensive debugging prints.
+    Call the Roboflow workflow 'leafy' using direct HTTP requests to avoid SDK errors.
     Returns: (result_dict, was_attempted_with_key)
     """
-    st.markdown("---")
-    st.subheader("Roboflow Debugging Output")
     
     api_key = None
-    
-    # --- 1. KEY RETRIEVAL STATUS ---
-    st.info("DEBUG STEP 1: Checking for API Key in st.secrets...")
     if "ROBOFLOW_API_KEY" in st.secrets:
         api_key = st.secrets["ROBOFLOW_API_KEY"]
-        st.code("Key found under st.secrets['ROBOFLOW_API_KEY']. Length: " + str(len(api_key)))
     elif "roboflow" in st.secrets and "api_key" in st.secrets["roboflow"]:
         api_key = st.secrets["roboflow"]["api_key"]
-        st.code("Key found under st.secrets['roboflow']['api_key']. Length: " + str(len(api_key)))
-    else:
-        st.error("❌ API Key NOT found in st.secrets.")
-        st.markdown("---")
-        return None, False
 
     if not api_key:
-        st.error("❌ API Key was found as an empty string.")
-        st.markdown("---")
         return None, False
 
-    # --- 2. CLIENT INITIALIZATION STATUS ---
+    # 1. Prepare the image as a base64 string
     try:
-        st.info("DEBUG STEP 2: Initializing InferenceHTTPClient...")
-        client = InferenceHTTPClient(
-            api_url="https://serverless.roboflow.com",
-            api_key=api_key,
-        )
-        st.code("Client initialized successfully.")
+        # Encode bytes to base64 string
+        base64_image = base64.b64encode(image_bytes).decode("utf-8")
     except Exception as e:
-        st.error(f"❌ Client initialization failed. Error: {e}")
-        st.markdown("---")
+        st.error(f"Failed to encode image for API: {e}")
         return None, True
 
-    # --- 3. WORKFLOW CALL STATUS ---
-    tmp_path = "tmp_phenotype_image.jpg"
-    result = None
+    # 2. Construct the API URL and Payload
+    # Using the Roboflow Hosted Inference URL structure for workflows
+    url = f"https://detect.roboflow.com/infer/workflows/rootweiler/leafy"
+    
+    params = {
+        "api_key": api_key
+    }
+    
+    # Construct payload matching Roboflow Workflow input expectations
+    payload = {
+        "inputs": {
+            "image": {
+                "type": "base64",
+                "value": base64_image
+            }
+        }
+    }
+
+    # 3. Send the Request
     try:
-        st.info("DEBUG STEP 3: Preparing and calling Roboflow workflow (Applying Final Input Fix)...")
+        response = requests.post(url, params=params, json=payload)
         
-        with open(tmp_path, "wb") as f:
-            f.write(image_bytes)
-
-        # FINAL FIX: Wrap the input dictionary in a list, as the SDK is treating 
-        # a single dictionary input as an iteration point and failing.
-        image_input_dict = {"image": tmp_path} 
-        image_input_list = [image_input_dict] # <--- THE CRITICAL CHANGE
+        # Raise error for bad HTTP status (401, 403, 500 etc)
+        response.raise_for_status()
         
-        st.code(f"Calling workflow: workspace='rootweiler', id='leafy' with input list: {image_input_list}")
+        result = response.json()
         
-        result = client.run_workflow(
-            workspace_name="rootweiler",
-            workflow_id="leafy",
-            images=image_input_list, # Pass the list containing the input dictionary
-        )
-        
-        st.code("Workflow call succeeded (received a response).")
-    except Exception as e:
-        st.error(f"❌ Roboflow API call failed (Network/Timeout/Authentication issue). Error: {e}")
-        st.markdown("---")
+    except requests.exceptions.HTTPError as e:
+        # Check if it's an API key issue
+        if response.status_code == 401 or response.status_code == 403:
+            st.error("❌ Roboflow Authentication Failed. Please check your API Key.")
+        else:
+            st.error(f"❌ Roboflow API Error ({response.status_code}): {response.text}")
         return None, True
-    finally:
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
+    except Exception as e:
+        st.error(f"❌ Network Error: {e}")
+        return None, True
 
-    # --- 4. RESPONSE PARSING STATUS ---
-    st.info("DEBUG STEP 4: Analyzing API response structure...")
-
-    obj = None
-    if isinstance(result, list) and len(result) > 0:
-        obj = result[0]
-    elif isinstance(result, dict):
-        obj = result
+    # 4. Process the Response
+    # The result is the JSON object returned by the API
+    obj = result
     
     if not isinstance(obj, dict):
-        st.error(f"❌ API Response is not a valid dictionary object (Type: {type(result)}).")
-        st.code(f"Raw Response Type: {type(result)}")
-        st.markdown("---")
         return None, True
 
-    st.code("Response Keys Found: " + ", ".join(obj.keys()))
-    
+    # Extract the predictions from "output2"
+    # Note: If your workflow output name is different, change "output2" here.
     preds = obj.get("output2") 
     
-    if "output2" not in obj:
-        st.error("❌ Key 'output2' is missing from the API response. Check Roboflow workflow output names.")
-        st.markdown("---")
-        return None, True
-        
-    st.info("DEBUG STEP 5: Checking 'output2' content for predictions...")
-    
-    if not isinstance(preds, list):
-        st.error(f"❌ 'output2' is not a list (Type: {type(preds)}). It should contain predictions.")
-        st.markdown("---")
-        return None, True
-    
-    if len(preds) == 0:
-        st.warning("⚠️ 'output2' is an empty list. **Model did not detect any leaves in the image.**")
-        st.warning("Action needed: Test your image directly on the Roboflow platform to verify model prediction behavior.")
-        st.markdown("---")
+    if not isinstance(preds, list) or len(preds) == 0:
+        # Only show detailed warning if we are debugging, otherwise simple fallback
+        # st.warning("⚠️ Workflow returned 0 predictions.") 
         return None, True
 
-    # --- 5. SUCCESS STATUS ---
-    st.success(f"✅ Roboflow SUCCESS: Found {len(preds)} predictions in 'output2'.")
-    st.markdown("---")
-    
     return {"predictions": preds}, True
 
 
@@ -354,7 +313,7 @@ class PhenotypingUI:
             # Show a specific message based on why Roboflow failed
             if attempted_rf:
                 st.warning("⚠️ Roboflow workflow failed or returned no predictions. Using color-based fallback.")
-                st.caption("This warning means the API call succeeded, but the model did not detect any leaves (returned an empty list). See the debug output above for details.")
+                st.caption("Common reasons: The image is blurry, too dark, or contains no recognizable leaves.")
             else:
                 st.caption("Leaf segmentation method: **Simple color-based fallback (Roboflow API key not configured)**.")
 
