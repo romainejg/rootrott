@@ -256,6 +256,7 @@ def sidebar_nav():
                 "Calculators",
                 "Climate",
                 "Phenotyping",
+                "Nutrients",
                 "Data & Graphs",
                 "Imaging",
             ],
@@ -598,6 +599,7 @@ def render_debugger_tool():
     )
 
 
+
 # -----------------------
 # Section: Data & Graphs
 # -----------------------
@@ -715,6 +717,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
