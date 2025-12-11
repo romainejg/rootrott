@@ -10,3 +10,4 @@ python-docx
 python-pptx
 seaborn
 plotly
+inference-sdk
