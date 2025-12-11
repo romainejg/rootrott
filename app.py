@@ -307,8 +307,8 @@ def render_home():
         st.markdown('<div class="rw-hero-name">Welcome to Rootweiler.</div>', unsafe_allow_html=True)
         st.markdown(
             '<div class="rw-hero-intro">'
-            "A non-profit app for **greenhouse leafy leaders** who live their days between crops, climate, and endless data. "
-            "Rootweiler is a hub of digital tools to assist working in the controlled environment agriculture industry."
+            "A non-profit app for greenhouse leafy leaders who live their days between crops, climate, and endless data. "
+            "Rootweiler is a hub of digital tools to assist with many aspects of the controlled environment agriculture industry."
             "</div>",
             unsafe_allow_html=True,
         )
@@ -714,6 +714,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
