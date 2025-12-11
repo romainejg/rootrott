@@ -407,7 +407,6 @@ def plot_time_series(timestamp, vpd, ppfd, temp, stress_segments):
         start = seg["start"]
         end = seg["end"]
         color = seg["color"]
-        label = seg["label"]
 
         # Add a semi-transparent vertical band across all rows
         for row in [1, 2, 3]:
@@ -419,7 +418,6 @@ def plot_time_series(timestamp, vpd, ppfd, temp, stress_segments):
                 line_width=0,
                 row=row,
                 col=1,
-                annotation_text=None,
             )
 
     fig.update_yaxes(title_text="VPD (kPa)", row=1, col=1)
@@ -435,7 +433,11 @@ def plot_time_series(timestamp, vpd, ppfd, temp, stress_segments):
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
 
+    # 🔥 Remove the default "new text" labels on the vrects
+    fig.update_layout(annotations=[])
+
     return fig
+
 
 # ----------------- Streamlit UI wrapper class ----------------- #
 
