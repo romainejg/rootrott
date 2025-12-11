@@ -16,9 +16,9 @@ import streamlit as st
 @dataclass
 class Fertilizer:
     name: str
-    n: float   # % N
-    p2o5: float  # % P₂O₅
-    k2o: float  # % K₂O
+    n: float      # % N
+    p2o5: float   # % P₂O₅
+    k2o: float    # % K₂O
 
 
 # A simple 3-salt lettuce recipe basis
@@ -63,7 +63,6 @@ def scale_stock_concentration(
 
     We want:
         Cs_old / R_old  =  Cs_new / R_new
-
     → Cs_new = Cs_old * R_new / R_old
     """
     if old_ratio <= 0 or new_ratio <= 0:
@@ -172,8 +171,6 @@ def acid_required_for_alkalinity_drop(
         density ≈ 1.58 g/mL
         w/w ≈ 0.75
         effective normality ~ 14 N (very rough, as multiprotic).
-
-    This is intentionally approximate – just a starting point for growers.
     """
     if initial_alk_ppm_caco3 <= target_alk_ppm_caco3:
         return {
@@ -192,8 +189,7 @@ def acid_required_for_alkalinity_drop(
     else:
         normality = 14.0
 
-    # meq/L = N * (mL/L) / 1000
-    # → mL/L = meq/L * 1000 / N
+    # meq/L = N * (mL/L) / 1000  → mL/L = meq/L * 1000 / N
     acid_ml_per_l = meq_l * 1000.0 / normality
     acid_ml_per_m3 = acid_ml_per_l * 1000.0
 
@@ -231,7 +227,7 @@ class NutrientToolsUI:
                 "Lettuce N–P–K ratio",
                 "Water quality",
                 "Leaf tissue (lettuce)",
-                "Stock recipe converter",  # ⬅ NEW 5th tab
+                "Stock recipe converter",
             ]
         )
 
@@ -248,7 +244,7 @@ class NutrientToolsUI:
             cls._tab_leaf_tissue()
 
         with tabs[4]:
-            cls._tab_stock_converter()  # ⬅ this now matches the 5th tab
+            cls._tab_stock_converter()
 
     # ------------------ Tab 1: EC / ppm mixer ------------------ #
 
@@ -265,25 +261,330 @@ class NutrientToolsUI:
             to answer “how many grams do I weigh out?”.
             """
         )
-        # ... (rest of your existing Tab 1 code unchanged)
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            mode = st.radio(
+                "Target basis",
+                ("Target ppm of a nutrient", "Estimate ppm from EC"),
+            )
+
+        with col2:
+            volume_l = st.number_input(
+                "Tank volume (L)",
+                min_value=1.0,
+                value=1000.0,
+                step=50.0,
+            )
+
+        if mode == "Target ppm of a nutrient":
+            st.markdown("#### Target ppm mode")
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                target_ppm = st.number_input(
+                    "Target ppm of chosen nutrient",
+                    min_value=0.0,
+                    value=150.0,
+                    step=10.0,
+                    help="For example: ppm N, ppm K₂O, etc., depending on the product.",
+                )
+            with col_b:
+                nutrient_percent = st.number_input(
+                    "Nutrient % in product",
+                    min_value=0.0,
+                    max_value=100.0,
+                    value=15.5,
+                    step=0.1,
+                    help="For example, 15.5 for a 15.5-0-0 calcium nitrate.",
+                )
+
+            if st.button("Calculate grams", type="primary", key="btn_ppm"):
+                grams = grams_for_target_ppm(target_ppm, volume_l, nutrient_percent)
+                st.success(
+                    f"Add **{grams:,.1f} g** of fertilizer "
+                    f"to **{volume_l:,.0f} L** to reach ~**{target_ppm:.0f} ppm** "
+                    f"of that nutrient."
+                )
+                st.caption(
+                    "Tip: This assumes the label % is given on a weight basis and the tank is well mixed."
+                )
+
+        else:
+            st.markdown("#### EC → approximate ppm converter")
+
+            ec = st.number_input(
+                "Measured EC (mS/cm)",
+                min_value=0.0,
+                value=2.0,
+                step=0.1,
+            )
+            factor = st.number_input(
+                "Conversion factor (ppm ≈ EC × factor)",
+                min_value=300.0,
+                max_value=900.0,
+                value=640.0,
+                step=10.0,
+                help="500–700 are typical; 640 is a common middle value.",
+            )
+
+            if st.button("Estimate ppm", type="primary", key="btn_ec"):
+                ppm = approximate_ppm_from_ec(ec, factor)
+                st.success(f"Estimated total dissolved salts: **~{ppm:.0f} ppm**")
+                st.caption(
+                    "This is a rough estimate and varies with fertilizer mix. "
+                    "Use as a relative guide rather than an absolute lab value."
+                )
 
     # ------------------ Tab 2: Lettuce N–P–K ratio ------------------ #
 
     @staticmethod
     def _tab_lettuce_npk():
-        # ... (unchanged)
+        st.markdown(
+            """
+            ### Lettuce N–P–K recipe helper
+
+            A simple 3-salt mixer for **lettuce-style N–P–K ratios** using:
+
+            - Calcium nitrate (15.5-0-0)  
+            - Potassium nitrate (13-0-46)  
+            - Mono potassium phosphate (0-52-34)  
+
+            It assumes a target **N:P₂O₅:K₂O ratio of 2:1:3** (common lettuce pattern)
+            and calculates grams **per 1000 L** of feed solution.
+            """
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            target_n = st.number_input(
+                "Target N (ppm)",
+                min_value=10.0,
+                value=150.0,
+                step=10.0,
+            )
+        with col2:
+            tank_volume_l = st.number_input(
+                "Actual tank volume (L)",
+                min_value=10.0,
+                value=1000.0,
+                step=50.0,
+                help="We’ll scale the 1000 L recipe to this volume.",
+            )
+
+        if st.button("Calculate lettuce recipe", type="primary"):
+            recipe = calculate_lettuce_npk_recipe(target_n_ppm=target_n)
+
+            if recipe is None:
+                st.error(
+                    "Could not find a valid combination with this target. "
+                    "Try a slightly different N level."
+                )
+                return
+
+            targets = recipe.pop("__targets__")
+            scale = tank_volume_l / 1000.0
+
+            st.markdown("#### Recipe")
+
+            rows = []
+            for fert_name, grams_per_1000l in recipe.items():
+                rows.append(
+                    {
+                        "Fertilizer": fert_name,
+                        "g / 1000 L": round(grams_per_1000l, 1),
+                        f"g / {tank_volume_l:.0f} L": round(grams_per_1000l * scale, 1),
+                    }
+                )
+
+            st.table(pd.DataFrame(rows))
+
+            st.markdown("#### Target N–P₂O₅–K₂O (approx.)")
+            st.write(
+                f"- N: **{targets['N (ppm)']:.0f} ppm**\n"
+                f"- P₂O₅: **{targets['P₂O₅ (ppm)']:.0f} ppm**\n"
+                f"- K₂O: **{targets['K₂O (ppm)']:.0f} ppm**"
+            )
+
+            st.caption(
+                "This is a simplified single-tank model aimed at lettuce-type recipes. "
+                "In real greenhouses you may split Ca and P into A/B stock tanks to avoid precipitation."
+            )
 
     # ------------------ Tab 3: Water quality ------------------ #
 
     @staticmethod
     def _tab_water_quality():
-        # ... (unchanged)
+        st.markdown(
+            """
+            ### Water quality / alkalinity helper
+
+            Rough guide to **how much acid** is needed to reduce alkalinity in irrigation water.
+
+            Assumes alkalinity is expressed as **mg/L CaCO₃** (common in lab reports).
+            """
+        )
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            initial_alk = st.number_input(
+                "Initial alkalinity (mg/L as CaCO₃)",
+                min_value=0.0,
+                value=180.0,
+                step=10.0,
+            )
+
+        with col2:
+            target_alk = st.number_input(
+                "Target alkalinity (mg/L as CaCO₃)",
+                min_value=0.0,
+                value=60.0,
+                step=10.0,
+                help="Often 40–80 mg/L is a comfortable range for many leafy crops.",
+            )
+
+        acid_type = st.selectbox(
+            "Acid type",
+            options=["Nitric acid 67%", "Phosphoric acid 75%"],
+        )
+
+        tank_volume_l = st.number_input(
+            "Tank size to treat (L)",
+            min_value=100.0,
+            value=1000.0,
+            step=100.0,
+        )
+
+        if st.button("Estimate acid requirement", type="primary"):
+            res = acid_required_for_alkalinity_drop(initial_alk, target_alk, acid_type)
+
+            if res["delta_alk"] <= 0:
+                st.info("Target alkalinity is not lower than current – no acid needed.")
+                return
+
+            ml_per_l = res["acid_ml_per_l"]
+            ml_per_m3 = res["acid_ml_per_m3"]
+            ml_for_tank = ml_per_l * tank_volume_l
+
+            st.markdown("#### Approximate acid requirement")
+
+            st.write(
+                f"- Drop in alkalinity: **{res['delta_alk']:.0f} mg/L as CaCO₃**\n"
+                f"- {acid_type}: **{ml_per_l:.2f} mL / L**\n"
+                f"- {acid_type}: **{ml_per_m3:.1f} mL / m³ (1000 L)**\n"
+                f"- For **{tank_volume_l:.0f} L**: **{ml_for_tank:.1f} mL** of acid"
+            )
+
+            st.caption(
+                "This is a simplified acid estimate. Always add acid carefully, wear PPE, "
+                "and confirm results with actual pH readings in your system."
+            )
 
     # ------------------ Tab 4: Lettuce leaf tissue ------------------ #
 
     @staticmethod
     def _tab_leaf_tissue():
-        # ... (unchanged)
+        st.markdown(
+            """
+            ### Leaf tissue interpretation (lettuce)
+
+            Enter your lab results for a lettuce tissue sample.  
+            Rootweiler compares them to a **typical optimal range** and flags low / high values.
+
+            Units assumed:
+            - Macros in **% of dry matter**
+            - Micros in **ppm** (mg/kg of dry matter)
+            """
+        )
+
+        # Build an input layout
+        col1, col2, col3 = st.columns(3)
+
+        # Macros (%)
+        with col1:
+            st.markdown("**Macro nutrients (%)**")
+            n_val = st.number_input("N (%)", min_value=0.0, value=3.5, step=0.1)
+            p_val = st.number_input("P (%)", min_value=0.0, value=0.5, step=0.01)
+            k_val = st.number_input("K (%)", min_value=0.0, value=4.0, step=0.1)
+            ca_val = st.number_input("Ca (%)", min_value=0.0, value=1.0, step=0.05)
+            mg_val = st.number_input("Mg (%)", min_value=0.0, value=0.3, step=0.01)
+            s_val = st.number_input("S (%)", min_value=0.0, value=0.4, step=0.01)
+
+        # Micros (ppm)
+        with col2:
+            st.markdown("**Micro nutrients (ppm)**")
+            fe_val = st.number_input("Fe (ppm)", min_value=0.0, value=120.0, step=5.0)
+            mn_val = st.number_input("Mn (ppm)", min_value=0.0, value=80.0, step=5.0)
+            zn_val = st.number_input("Zn (ppm)", min_value=0.0, value=40.0, step=2.0)
+            cu_val = st.number_input("Cu (ppm)", min_value=0.0, value=8.0, step=1.0)
+            b_val = st.number_input("B (ppm)", min_value=0.0, value=40.0, step=2.0)
+            mo_val = st.number_input("Mo (ppm)", min_value=0.0, value=2.0, step=0.5)
+
+        with col3:
+            st.markdown("**Notes**")
+            st.write(
+                "- These ranges are **lettuce-focused** and approximate.\n"
+                "- Best used to spot **patterns** (e.g., K high, Ca low) "
+                "rather than aiming to hit a single exact number."
+            )
+
+        if st.button("Interpret tissue test", type="primary"):
+            values = {
+                "N (%)": n_val,
+                "P (%)": p_val,
+                "K (%)": k_val,
+                "Ca (%)": ca_val,
+                "Mg (%)": mg_val,
+                "S (%)": s_val,
+                "Fe (ppm)": fe_val,
+                "Mn (ppm)": mn_val,
+                "Zn (ppm)": zn_val,
+                "Cu (ppm)": cu_val,
+                "B (ppm)": b_val,
+                "Mo (ppm)": mo_val,
+            }
+
+            rows = []
+            comments = []
+
+            for nutrient, (low, high) in LETTUCE_TISSUE_RANGES.items():
+                val = values.get(nutrient, np.nan)
+                status = interpret_leaf_value(val, low, high)
+
+                rows.append(
+                    {
+                        "Nutrient": nutrient,
+                        "Value": round(val, 3),
+                        "Optimal low": low,
+                        "Optimal high": high,
+                        "Status": status,
+                    }
+                )
+
+                if status == "Low":
+                    comments.append(f"- **{nutrient}** is **low** – may limit growth or quality.")
+                elif status == "High":
+                    comments.append(f"- **{nutrient}** is **high** – watch for toxicity or imbalance.")
+
+            st.markdown("#### Summary table")
+            st.table(pd.DataFrame(rows))
+
+            st.markdown("#### Interpretation")
+            if not comments:
+                st.success(
+                    "All entered nutrients are within the typical lettuce range – "
+                    "no major red flags from this panel."
+                )
+            else:
+                for c in comments:
+                    st.write(c)
+
+            st.caption(
+                "Always interpret tissue tests together with climate, variety, growth stage, "
+                "and visual symptoms. This tool is a guide, not a diagnosis."
+            )
 
     # ------------------ Tab 5: Stock recipe converter ------------------ #
 
@@ -375,4 +676,3 @@ class NutrientToolsUI:
                 "We keep (stock / ratio) the same, so when you change from 1:100 to 1:150, "
                 "stock concentration is multiplied by 150/100."
             )
-
