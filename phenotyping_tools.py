@@ -2,97 +2,92 @@
 
 import os
 import tempfile
-from typing import List, Tuple, Optional, Any
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
+import pandas as pd
 import streamlit as st
-from PIL import Image
 
 try:
     from inference_sdk import InferenceHTTPClient
-    _ROBOFLOW_AVAILABLE = True
-except Exception:
-    _ROBOFLOW_AVAILABLE = False
+except ImportError:
+    InferenceHTTPClient = None  # handled gracefully below
 
 
-# -------------------------------
-# Roboflow config – EDIT IF NEEDED
-# -------------------------------
+# -----------------------------
+# Config
+# -----------------------------
+
 ROBOFLOW_WORKSPACE = "rootweiler"
-ROBOFLOW_WORKFLOW_ID = "leafy"  # your updated workflow
+ROBOFLOW_WORKFLOW_ID = "leafy"   # your workflow id
 
 
-BBox = Tuple[int, int, int, int]  # (x, y, w, h)
+@dataclass
+class LeafMeasurement:
+    leaf_id: int
+    area_cm2: float
+    height_cm: float
+    width_cm: float
+    area_to_height: float
 
 
-# =========================================================
-# 1. Grid calibration – same idea as your old square logic
-# =========================================================
+# -----------------------------
+# Grid calibration (your logic)
+# -----------------------------
 
-def calculate_pixels_per_cm2_and_squares(
-    image_bgr: np.ndarray,
-) -> Tuple[Optional[float], List[BBox]]:
+def calculate_pixels_per_cm2(image_bgr: np.ndarray) -> Optional[float]:
     """
-    Estimate pixels per cm² using square-like objects in the image.
-    Logic mirrors your earlier code:
+    Estimate pixels per cm² using the printed grid.
+    Each grid square is 1 cm².
 
-      - find contours on Canny edges
-      - keep near-square bounding boxes (w ≈ h)
-      - require area > 1000 px
-      - need at least 20 squares for a stable estimate
-
-    Returns:
-      pixels_per_cm2 (float | None),
-      list of chosen square bounding boxes (x, y, w, h) for overlay.
+    Logic adapted from your earlier function:
+    - Find many roughly square contours
+    - Filter by size and aspect ratio
+    - Use median area of those squares as pixels_per_cm²
     """
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-
     contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-    squares: List[BBox] = []
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        if w <= 0 or h <= 0:
-            continue
-        # near-square + not tiny
+    squares: List[Tuple[int, int, int, int]] = []
+
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        # near-square, not tiny, not huge
         if abs(w - h) < 10 and w * h > 1000:
             squares.append((x, y, w, h))
 
-    # Need enough squares to be confident
     if len(squares) < 20:
-        return None, []
+        return None
 
     areas = [w * h for (_, _, w, h) in squares]
-    median_area = float(np.median(areas))
+    median_area = np.median(areas)
 
-    # Choose squares closest to the median area
+    # Keep ~20 closest to median
     squares_sorted = sorted(
         squares,
         key=lambda s: abs((s[2] * s[3]) - median_area),
-    )
-    selected = squares_sorted[:20]
+    )[:20]
 
-    average_area = float(np.mean([w * h for (_, _, w, h) in selected]))
-    pixels_per_cm2 = average_area  # 1 cm² ≈ this many pixels
+    avg_area = np.mean([w * h for (_, _, w, h) in squares_sorted])
 
-    return pixels_per_cm2, selected
+    return float(avg_area)
 
 
-# =========================================================
-# 2. Fallback color-based leaf segmentation
-# =========================================================
+# -----------------------------
+# Simple fallback segmentation
+# -----------------------------
 
-def segment_leaves_hsv(image_bgr: np.ndarray) -> np.ndarray:
+def simple_color_mask(image_bgr: np.ndarray) -> np.ndarray:
     """
-    Simple HSV range for lettuce leaves as fallback.
+    Simple HSV-based leaf segmentation as fallback if Roboflow fails.
     """
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
 
-    # Broad green-ish range; can be tuned
-    lower_green = np.array([25, 30, 30])
-    upper_green = np.array([95, 255, 255])
+    lower_green = np.array([0, 40, 40])
+    upper_green = np.array([90, 255, 255])
     mask = cv2.inRange(hsv, lower_green, upper_green)
 
     kernel = np.ones((3, 3), np.uint8)
@@ -102,351 +97,285 @@ def segment_leaves_hsv(image_bgr: np.ndarray) -> np.ndarray:
     return mask
 
 
-def extract_leaf_contours(mask: np.ndarray, min_area_px: int = 300) -> List[np.ndarray]:
-    """
-    Find leaf blobs in a binary mask and filter tiny specks.
-    """
-    contours, _ = cv2.findContours(
-        mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
-    large = [c for c in contours if cv2.contourArea(c) >= min_area_px]
-    return large
+# -----------------------------
+# Roboflow call & mask creation
+# -----------------------------
 
+def _get_roboflow_client() -> Optional[InferenceHTTPClient]:
+    api_key = None
+    if hasattr(st, "secrets"):
+        api_key = st.secrets.get("ROBOFLOW_API_KEY", None)
+    if not api_key:
+        api_key = os.environ.get("ROBOFLOW_API_KEY")
 
-# =========================================================
-# 3. Roboflow integration
-# =========================================================
-
-def _call_roboflow_workflow(
-    image_bytes: bytes,
-    filename: str,
-    api_key: str,
-) -> Any:
-    """
-    Call Roboflow workflow via the official SDK, sending a temp file path.
-    We return whatever the SDK gives us (list/dict), and parse it separately.
-    """
-    if not _ROBOFLOW_AVAILABLE:
-        raise RuntimeError("inference_sdk not installed in this environment.")
+    if not api_key or InferenceHTTPClient is None:
+        return None
 
     client = InferenceHTTPClient(
         api_url="https://serverless.roboflow.com",
         api_key=api_key,
     )
+    return client
 
-    # Use a temp file; Roboflow docs show passing a path string.
-    suffix = os.path.splitext(filename)[1] or ".jpg"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+
+def _run_roboflow_workflow(image_bytes: bytes) -> Optional[dict]:
+    """
+    Send image to the Roboflow workflow and return the first element
+    of the decoded output (your JSON).
+    """
+    client = _get_roboflow_client()
+    if client is None:
+        return None
+
+    # Write bytes to a temporary file – the SDK likes file paths
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
         tmp.write(image_bytes)
         tmp_path = tmp.name
 
     try:
-        # NOTE: we do NOT pass use_cache here to stay compatible with
-        # the SDK version that previously complained about that kwarg.
         result = client.run_workflow(
             workspace_name=ROBOFLOW_WORKSPACE,
             workflow_id=ROBOFLOW_WORKFLOW_ID,
             images={"image": tmp_path},
-            parameters={
-                "output_message": "Your model is being initialized, try again in a few seconds."
-            },
+            parameters={"output_message": "rootweiler phenotyping"},
+            use_cache=True,
         )
     finally:
         try:
             os.remove(tmp_path)
-        except Exception:
+        except OSError:
             pass
 
-    return result
-
-
-def _find_prediction_lists(obj: Any) -> List[list]:
-    """
-    Recursively search an arbitrary nested structure for keys named 'predictions'
-    that hold a list. This is robust to different workflow node layouts.
-    """
-    found: List[list] = []
-
-    def _search(o: Any):
-        if isinstance(o, dict):
-            if "predictions" in o and isinstance(o["predictions"], list):
-                found.append(o["predictions"])
-            for v in o.values():
-                _search(v)
-        elif isinstance(o, list):
-            for item in o:
-                _search(item)
-
-    _search(obj)
-    return found
-
-
-def parse_roboflow_leaf_polygons(
-    rf_result: Any,
-    image_shape: Tuple[int, int, int],
-) -> Optional[List[np.ndarray]]:
-    """
-    Turn Roboflow workflow output into a list of leaf instance polygons.
-
-    We look through the structure for 'predictions' lists containing objects
-    with a 'points' (or similar) key: list of [x, y].
-
-    Returns:
-      list of contours (opencv-style Nx1x2 int32 arrays), or None if nothing usable.
-    """
-    h, w, _ = image_shape
-
-    preds_lists = _find_prediction_lists(rf_result)
-    if not preds_lists:
+    # Expecting a list with one dict like the JSON you pasted
+    if not isinstance(result, list) or not result:
         return None
 
-    polygons: List[np.ndarray] = []
+    return result[0]
 
-    for preds in preds_lists:
-        for p in preds:
-            # Typical instance segmentation output: polygon in 'points'
-            pts = p.get("points") or p.get("polygon") or p.get("segmentation")
-            if pts and isinstance(pts, list):
-                try:
-                    arr = np.array(pts, dtype=np.float32)
-                    if arr.ndim == 2 and arr.shape[1] == 2:
-                        # clamp to image bounds
-                        arr[:, 0] = np.clip(arr[:, 0], 0, w - 1)
-                        arr[:, 1] = np.clip(arr[:, 1], 0, h - 1)
-                        arr_int = arr.astype(np.int32)
-                        polygons.append(arr_int.reshape(-1, 1, 2))
-                except Exception:
-                    continue
 
-    if not polygons:
+def mask_from_roboflow_output(rf_output: dict) -> Optional[np.ndarray]:
+    """
+    Build a binary mask from Roboflow workflow output.
+
+    Your JSON looks like:
+        [
+          {
+            "output2": {
+              "image": {"width": W, "height": H},
+              "predictions": [
+                 {"points": [{"x":..., "y":...}, ...], "class": "leaf", ...},
+                 ...
+              ]
+            },
+            "output": {... base64 mask ...}
+          }
+        ]
+    """
+    if "output2" not in rf_output:
         return None
 
-    return polygons
+    model_out = rf_output["output2"]
+    img_meta = model_out.get("image", {})
+    preds = model_out.get("predictions", [])
 
+    width = int(img_meta.get("width", 0))
+    height = int(img_meta.get("height", 0))
 
-def segment_leaves_with_roboflow(
-    image_bgr: np.ndarray,
-    image_bytes: bytes,
-    filename: str,
-    api_key: str,
-) -> Tuple[np.ndarray, List[np.ndarray]]:
-    """
-    Full Roboflow pipeline:
-      - Call workflow
-      - Parse polygons
-      - Build a binary mask + list of contours
+    if width <= 0 or height <= 0 or not preds:
+        return None
 
-    Raises if anything goes wrong so caller can fall back.
-    """
-    rf_result = _call_roboflow_workflow(
-        image_bytes=image_bytes,
-        filename=filename,
-        api_key=api_key,
-    )
-    polygons = parse_roboflow_leaf_polygons(rf_result, image_bgr.shape)
+    mask = np.zeros((height, width), dtype=np.uint8)
 
-    if not polygons:
-        raise RuntimeError("No usable leaf polygons found in Roboflow output.")
+    for det in preds:
+        pts_list = det.get("points", [])
+        if not pts_list:
+            continue
+        pts = np.array([[p["x"], p["y"]] for p in pts_list], dtype=np.int32)
+        pts = pts.reshape(-1, 1, 2)
+        cv2.fillPoly(mask, [pts], 255)
 
-    mask = np.zeros(image_bgr.shape[:2], dtype=np.uint8)
-    cv2.fillPoly(mask, polygons, 255)
-
-    # Optional: clean up mask a bit
+    # Clean up a little
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-
-    contours = polygons  # treat polygons as contours
-
-    return mask, contours
+    return mask
 
 
-# =========================================================
-# 4. Streamlit UI wrapper
-# =========================================================
+# -----------------------------
+# Leaf measurement
+# -----------------------------
+
+def measure_leaves(mask: np.ndarray, pixels_per_cm2: float) -> List[LeafMeasurement]:
+    """
+    Measure each connected leaf region in the mask.
+
+    Returns list of LeafMeasurement.
+    """
+    px_per_cm = float(np.sqrt(pixels_per_cm2))
+    labeled, num_labels = cv2.connectedComponents(mask)
+
+    measurements: List[LeafMeasurement] = []
+
+    for label_id in range(1, num_labels):
+        comp_mask = (labeled == label_id).astype(np.uint8)
+        area_px = int(comp_mask.sum())
+        if area_px < 2000:  # filter tiny specks
+            continue
+
+        ys, xs = np.where(comp_mask > 0)
+        y_min, y_max = int(ys.min()), int(ys.max())
+        x_min, x_max = int(xs.min()), int(xs.max())
+        h_px = y_max - y_min + 1
+        w_px = x_max - x_min + 1
+
+        area_cm2 = area_px / pixels_per_cm2
+        height_cm = h_px / px_per_cm
+        width_cm = w_px / px_per_cm
+        ratio = area_cm2 / height_cm if height_cm > 0 else np.nan
+
+        measurements.append(
+            LeafMeasurement(
+                leaf_id=label_id,
+                area_cm2=area_cm2,
+                height_cm=height_cm,
+                width_cm=width_cm,
+                area_to_height=ratio,
+            )
+        )
+
+    return measurements
+
+
+# -----------------------------
+# Streamlit UI
+# -----------------------------
 
 class PhenotypingUI:
-    """
-    Leaf phenotyping for lettuce:
-      - Estimates scale using 1 cm² grid
-      - Calls Roboflow instance segmentation when available
-      - Falls back to HSV segmentation if needed
-      - Computes leaf count + per-leaf area in cm²
-    """
+    """Rootweiler phenotyping tools: leaf segmentation + measurements."""
 
     @classmethod
     def render(cls):
-        st.subheader("Phenotyping (leaf area & count)")
+        st.subheader("Leaf phenotyping")
 
         st.markdown(
             """
-            Upload a canopy image. Rootweiler will:
+            Upload an image on the 1 cm grid board.  
+            Rootweiler will:
 
-            - Estimate physical scale using the 1 cm² background grid  
-            - Run a **Roboflow instance segmentation** workflow (`leafy`)  
-            - Fall back to a simple color-based mask if the workflow fails  
-            - Count leaves and estimate individual leaf areas (cm²)
+            - Segment each **leaf** (using your Roboflow instance segmentation model)
+            - Use the printed grid to convert **pixels → cm²**
+            - Report leaf count, area, height, width, and area/height ratio
+            - Summarize average leaf size and variation
             """
         )
 
         uploaded = st.file_uploader(
-            "Upload lettuce canopy image",
+            "Upload a grid-board image (JPG/PNG)",
             type=["jpg", "jpeg", "png"],
         )
 
         if uploaded is None:
-            st.info("Upload an image to begin.")
             return
 
-        # Load as PIL + OpenCV BGR
-        try:
-            pil_image = Image.open(uploaded).convert("RGB")
-        except Exception as e:
-            st.error(f"Could not open image: {e}")
+        image_bytes = uploaded.read()
+        image_array = np.frombuffer(image_bytes, np.uint8)
+        img_bgr = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+        if img_bgr is None:
+            st.error("Could not read image.")
             return
 
-        image_np = np.array(pil_image)
-        image_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-        st.markdown("#### Original image")
-        st.image(pil_image, use_column_width=True)
+        # --- Grid calibration ---
+        pixels_per_cm2 = calculate_pixels_per_cm2(img_bgr)
 
-        # ---- Grid calibration ----
-        pixels_per_cm2, grid_squares = calculate_pixels_per_cm2_and_squares(image_bgr)
-
-        col_cal, col_cal_img = st.columns([1, 2])
-
-        with col_cal:
-            st.markdown("##### Grid calibration")
-            if pixels_per_cm2 is None:
-                st.warning(
-                    "Could not reliably detect enough grid squares. "
-                    "Areas will be reported only in pixels."
-                )
-            else:
-                st.success(
-                    f"Estimated ~**{pixels_per_cm2:.1f} pixels per cm²** "
-                    "(using background squares)."
-                )
-
-        with col_cal_img:
-            overlay = image_bgr.copy()
-            for (x, y, w, h) in grid_squares:
-                cv2.rectangle(overlay, (x, y), (x + w, y + h), (255, 0, 0), 2)
-            overlay_rgb = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
-            st.image(
-                overlay_rgb,
-                caption="Grid squares used for calibration",
-                use_column_width=True,
+        if pixels_per_cm2 is None:
+            st.error(
+                "Could not detect enough grid squares to calibrate pixels per cm. "
+                "Check that the board is visible and in focus."
             )
-
-        # Roboflow API key from Streamlit secrets
-        api_key = st.secrets.get("ROBOFLOW_API_KEY") if hasattr(st, "secrets") else None
-
-        if _ROBOFLOW_AVAILABLE and api_key:
-            st.caption(
-                f"Roboflow workflow: `{ROBOFLOW_WORKSPACE}/{ROBOFLOW_WORKFLOW_ID}`"
-            )
-        elif not _ROBOFLOW_AVAILABLE:
-            st.caption("Roboflow SDK not installed; using color-based segmentation only.")
-        else:
-            st.caption("No `ROBOFLOW_API_KEY` in secrets; using color-based segmentation only.")
-
-        if not st.button("Run phenotyping", type="primary"):
             return
 
-        # ---- Segmentation pipeline ----
-        mask: np.ndarray
-        contours: List[np.ndarray]
-        method_label = ""
+        px_per_cm = float(np.sqrt(pixels_per_cm2))
 
-        # Try Roboflow first
-        if _ROBOFLOW_AVAILABLE and api_key:
-            try:
-                mask, contours = segment_leaves_with_roboflow(
-                    image_bgr=image_bgr,
-                    image_bytes=uploaded.getvalue(),
-                    filename=uploaded.name,
-                    api_key=api_key,
-                )
-                method_label = "Roboflow instance segmentation"
-            except Exception:
-                mask = segment_leaves_hsv(image_bgr)
-                contours = extract_leaf_contours(mask)
-                method_label = "Color-based fallback"
-        else:
-            mask = segment_leaves_hsv(image_bgr)
-            contours = extract_leaf_contours(mask)
-            method_label = "Color-based fallback"
+        st.markdown(
+            f"**Calibrated scale:** ~{pixels_per_cm2:,.1f} pixels per cm² "
+            f"(~{px_per_cm:,.1f} pixels per cm)."
+        )
 
-        if len(contours) == 0:
+        if st.button("Run leaf analysis", type="primary"):
+            cls._run_analysis(image_bytes, img_rgb, pixels_per_cm2)
+
+    @classmethod
+    def _run_analysis(cls, image_bytes: bytes, img_rgb: np.ndarray, pixels_per_cm2: float):
+        st.markdown("### Segmentation overview")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Original image**")
+            st.image(img_rgb, use_container_width=True)
+
+        # --- Roboflow segmentation ---
+        mask = None
+        rf_output = _run_roboflow_workflow(image_bytes)
+
+        if rf_output is not None:
+            mask = mask_from_roboflow_output(rf_output)
+
+        if mask is None:
             st.warning(
-                "No leaf objects detected with the current segmentation method."
+                "Roboflow workflow unavailable or returned no predictions. "
+                "Using simple color-based segmentation instead."
             )
+            # fallback mask uses the decoded BGR image
+            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+            mask = simple_color_mask(img_bgr)
+
+        # Ensure mask matches displayed image size
+        if mask.shape[:2] != img_rgb.shape[:2]:
+            mask = cv2.resize(mask, (img_rgb.shape[1], img_rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+        with col2:
+            st.markdown("**Binary leaf mask**")
+            st.image(mask, use_container_width=True, clamp=True)
+
+        # --- Measurements ---
+        measurements = measure_leaves(mask, pixels_per_cm2)
+        if not measurements:
+            st.error("No leaf regions detected after segmentation.")
             return
 
-        # Visualization
-        vis = image_bgr.copy()
-        cv2.drawContours(vis, contours, -1, (0, 255, 0), 2)
-        vis_rgb = cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
+        df = pd.DataFrame(
+            [
+                {
+                    "Leaf ID": m.leaf_id,
+                    "Area (cm²)": round(m.area_cm2, 2),
+                    "Height (cm)": round(m.height_cm, 2),
+                    "Width (cm)": round(m.width_cm, 2),
+                    "Area / height (cm)": round(m.area_to_height, 2),
+                }
+                for m in measurements
+            ]
+        ).sort_values("Leaf ID")
 
-        col_vis1, col_vis2 = st.columns(2)
-        with col_vis1:
-            st.markdown(f"#### Detected leaves ({method_label})")
-            st.image(
-                vis_rgb,
-                caption=f"Leaf contours (count: {len(contours)})",
-                use_column_width=True,
-            )
-        with col_vis2:
-            st.markdown("#### Segmentation mask")
-            st.image(
-                mask,
-                caption="Binary mask used for analysis",
-                use_column_width=True,
-            )
+        st.markdown("### Leaf measurements")
+        st.dataframe(df, use_container_width=True)
 
-        # ---- Leaf metrics ----
-        leaf_areas_px = [cv2.contourArea(c) for c in contours]
+        # Summary stats
+        areas = np.array([m.area_cm2 for m in measurements])
+        heights = np.array([m.height_cm for m in measurements])
 
-        if pixels_per_cm2:
-            leaf_areas_cm2 = [a / pixels_per_cm2 for a in leaf_areas_px]
-            total_area_cm2 = float(np.sum(leaf_areas_cm2))
-            mean_leaf_cm2 = float(np.mean(leaf_areas_cm2))
-            std_leaf_cm2 = float(np.std(leaf_areas_cm2))
-        else:
-            leaf_areas_cm2 = None
-            total_area_cm2 = None
-            mean_leaf_cm2 = None
-            std_leaf_cm2 = None
+        st.markdown("### Summary")
+        st.write(f"- **Leaf count:** {len(measurements)}")
+        st.write(
+            f"- **Average leaf area:** {areas.mean():.2f} cm² "
+            f"(std dev: {areas.std(ddof=1):.2f} cm²)"
+        )
+        st.write(
+            f"- **Average leaf height:** {heights.mean():.2f} cm "
+            f"(std dev: {heights.std(ddof=1):.2f} cm)"
+        )
 
-        st.markdown("#### Leaf metrics")
-        st.write(f"- Number of detected leaves: **{len(contours)}**")
-
-        if pixels_per_cm2 and leaf_areas_cm2 is not None:
-            st.write(f"- Total leaf area (approx): **{total_area_cm2:.1f} cm²**")
-            st.write(f"- Average leaf area: **{mean_leaf_cm2:.2f} cm²**")
-            st.write(f"- Leaf area standard deviation: **{std_leaf_cm2:.2f} cm²**")
-        else:
-            st.write("- Areas are only available in pixels (no reliable grid calibration).")
-
-        # Small table of per-leaf areas
-        with st.expander("Per-leaf areas", expanded=False):
-            import pandas as pd
-
-            if pixels_per_cm2 and leaf_areas_cm2 is not None:
-                df = pd.DataFrame(
-                    {
-                        "Leaf #": np.arange(1, len(contours) + 1),
-                        "Area (px)": np.round(leaf_areas_px, 1),
-                        "Area (cm²)": np.round(leaf_areas_cm2, 3),
-                    }
-                )
-            else:
-                df = pd.DataFrame(
-                    {
-                        "Leaf #": np.arange(1, len(contours) + 1),
-                        "Area (px)": np.round(leaf_areas_px, 1),
-                    }
-                )
-
-            st.dataframe(df, use_container_width=True)
+        st.caption(
+            "Area is based on the segmented leaf region; height and width are from the "
+            "bounding box in centimetres using the calibrated grid."
+        )
