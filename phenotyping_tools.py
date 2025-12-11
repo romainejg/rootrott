@@ -1,4 +1,4 @@
-# phenotyping_tools.py - Bare Bones Mask Output with Direct HTTP Call
+# phenotyping_tools.py - Bare Bones Mask Output with Direct HTTP Call and Safety Check
 
 import io
 import os
@@ -6,10 +6,8 @@ import streamlit as st
 import cv2
 import numpy as np
 import base64
-import requests # <-- We rely on this standard library now
+import requests
 from typing import List, Optional, Tuple, Dict
-
-# No longer need to import inference_sdk if we use requests
 
 # ---------------------------------------------------------------------
 # Roboflow Workflow Integration (Using Direct HTTP POST)
@@ -17,7 +15,7 @@ from typing import List, Optional, Tuple, Dict
 @st.cache_data(show_spinner="Running Roboflow segmentation...")
 def _run_roboflow_workflow(image_bytes: bytes) -> Tuple[Optional[Dict[str, object]], bool]:
     
-    # 1. Key Retrieval (Retained for validation)
+    # 1. Key Retrieval
     api_key = None
     if "ROBOFLOW_API_KEY" in st.secrets:
         api_key = st.secrets["ROBOFLOW_API_KEY"]
@@ -35,13 +33,13 @@ def _run_roboflow_workflow(image_bytes: bytes) -> Tuple[Optional[Dict[str, objec
     except Exception:
         return None, True
 
+    # Note: Use detect.roboflow.com/infer for workflows via HTTP
     url = "https://detect.roboflow.com/infer/workflows/rootweiler/leafy"
     
     params = {
         "api_key": api_key
     }
     
-    # Payload matches Roboflow Workflow input expectations for base64
     payload = {
         "inputs": {
             "image": {
@@ -55,11 +53,10 @@ def _run_roboflow_workflow(image_bytes: bytes) -> Tuple[Optional[Dict[str, objec
     result = None
     try:
         response = requests.post(url, params=params, json=payload)
-        response.raise_for_status() # Raise exception for bad status codes (4xx or 5xx)
+        response.raise_for_status()
         result = response.json()
         
     except requests.exceptions.RequestException as e:
-        # Check if it's an API key issue (though less likely now)
         if hasattr(e, 'response') and (e.response.status_code == 401 or e.response.status_code == 403):
             st.error("❌ Roboflow Auth Error via HTTP. Key permissions may be incorrect.")
         else:
@@ -71,19 +68,16 @@ def _run_roboflow_workflow(image_bytes: bytes) -> Tuple[Optional[Dict[str, objec
 
 
     # 4. Process Results
-    
-    # A successful HTTP workflow call returns a dictionary, not a list
     obj = result
     
     if not isinstance(obj, dict):
-        st.error("❌ API Response was not a valid dictionary object.")
+        # The HTTP API should return a dictionary
         return None, True
     
-    # Extract predictions from "output2" (Assuming this is still the workflow output name)
+    # Extract predictions from "output2"
     preds = obj.get("output2")
     
     if not isinstance(preds, list) or len(preds) == 0:
-        st.warning("⚠️ Prediction list ('output2') was empty. Model saw nothing.")
         return None, True
 
     return {"predictions": preds}, True
@@ -126,7 +120,19 @@ class PhenotypingUI:
             return
 
         image_bytes = uploaded.read()
-        pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        
+        # --- CRITICAL SAFETY CHECK ---
+        if not image_bytes:
+            st.error("❌ The uploaded file is empty or corrupted. Please check the file and try again.")
+            return
+        # -----------------------------
+
+        try:
+            pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        except Exception:
+            st.error("❌ Could not open the uploaded file. Ensure it is a valid JPG or PNG image.")
+            return
+
         img_rgb = np.array(pil_img)
 
         # --- Segmentation ---
@@ -146,6 +152,6 @@ class PhenotypingUI:
 
         else:
             if attempted_rf:
-                st.error("❌ Roboflow failed to return a mask. The API call completed, but no leaves were detected, or a non-SDK error occurred.")
+                st.error("❌ Roboflow failed to return a mask. This may mean zero leaves were detected, or a network/API issue occurred.")
             else:
                 st.error("❌ API Key not found in `secrets.toml`. Cannot generate mask.")
