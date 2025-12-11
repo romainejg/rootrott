@@ -308,7 +308,7 @@ def render_home():
         st.markdown(
             '<div class="rw-hero-intro">'
             "A non-profit app for greenhouse leafy leaders who live their days between crops, climate, and endless data. "
-            "Rootweiler is a hub of digital tools to assist working in the controlled environment agriculture industry. Includes tools like calculators (DLI, VPD), climate analysis (temp, VPD, and ppfd oriented), nutrient help (ratios, balancing, and more!"
+            "Rootweiler is a hub of digital tools to assist working in the controlled environment agriculture industry."
             "</div>",
             unsafe_allow_html=True,
         )
@@ -714,6 +714,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
