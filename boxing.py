@@ -105,23 +105,32 @@ def generate_box_plot_figure(
 
 
 def generate_box_plot_from_excel(
-    file: Union[str, bytes],
+    file: Union[str, bytes, bytearray],
     x_column: str,
     y_column: str,
     plot_title: str,
     x_label: str,
     y_label: str,
+    sheet: Optional[Union[str, int]] = None,
 ) -> plt.Figure:
     """
     Convenience function:
     - Load Excel (path or bytes)
+    - Optionally choose a sheet (by name or index; default = first sheet)
     - Build DataFrame
     - Return a Matplotlib Figure with the box plot
     """
+    # Create an ExcelFile object so we can choose sheet
     if isinstance(file, (bytes, bytearray)):
-        data = pd.read_excel(BytesIO(file))
+        excel = pd.ExcelFile(BytesIO(file))
     else:
-        data = pd.read_excel(file)
+        excel = pd.ExcelFile(file)
+
+    # Default to first sheet if none specified
+    if sheet is None:
+        sheet = excel.sheet_names[0]
+
+    data = excel.parse(sheet_name=sheet)
 
     return generate_box_plot_figure(
         data=data,
