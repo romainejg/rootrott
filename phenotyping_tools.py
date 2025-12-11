@@ -123,11 +123,13 @@ def run_roboflow_workflow(image_bgr: np.ndarray) -> Dict[str, Any]:
 
     try:
         result = client.run_workflow(
-            workspace_name=WORKSPACE_NAME,
-            workflow_id=WORKFLOW_ID,
-            images={"image": tmp_path},
-            use_cache=True,
+            workspace_name="rootweiler",
+            workflow_id="find-leaves-3",
+            images={
+                "image": image_bytes
+            },
         )
+        
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
