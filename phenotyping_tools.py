@@ -218,7 +218,7 @@ def _call_roboflow_workflow(
 # Phenotyping UI
 # -------------------------------
 
-class PhenotypingToolsUI:
+class PhenotypingUI:
     """
     Phenotyping / leaf analysis tool.
 
