@@ -336,7 +336,7 @@ def render_home():
 def render_calculators():
     st.markdown("## Calculators")
 
-    tab_dli, tab_vpd, tab_density, tab_units = st.tabs(
+    tab_dli, tab_vpd, tab_density, tab_units, tab_canopy = st.tabs(
         ["Daily Light Integral (DLI)", "Vapor Pressure Deficit (VPD)", "Plants per m²", "Unit Converter"]
     )
 
@@ -351,29 +351,9 @@ def render_calculators():
 
     with tab_units:
         calculators.UnitConverterCalculator.render()
-
-    # -----------------------
-    # VPD calculator
-    # -----------------------
-def render_calculators():
-    st.markdown("## Calculators")
-
-    tab_dli, tab_vpd, tab_density, tab_units = st.tabs(
-        ["Daily Light Integral (DLI)", "Vapor Pressure Deficit (VPD)", "Plants per m²", "Unit Converter"]
-    )
-
-    with tab_dli:
-        calculators.DLICalculator.render()
-
-    with tab_vpd:
-        calculators.VPDCalculator.render()
-
-    with tab_density:
-        calculators.GutterPlantDensityCalculator.render()
-
-    with tab_units:
-        calculators.UnitConverterCalculator.render()
-
+        
+    with tab_canopy:
+        calculators.CanopyClosureCalculator.render()
 
 
 # -----------------------
@@ -715,6 +695,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
