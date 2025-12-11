@@ -15,7 +15,7 @@ import io
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Any
 
-
+import cv2
 import numpy as np
 import pandas as pd
 import requests
@@ -290,8 +290,6 @@ def _measure_leaves(mask: np.ndarray, pixels_per_cm2: float) -> List[LeafMeasure
 # ---------------------------------------------------------------------
 class PhenotypingUI:
     """Leaf phenotyping tool using Roboflow workflow + grid calibration."""
-    
-    import cv2
     
     @classmethod
     def render(cls):
