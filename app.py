@@ -6,7 +6,6 @@ import streamlit as st
 from PIL import Image
 import numpy as np
 import pandas as pd
-import cv2
 import base64
 import calculators
 
@@ -714,6 +713,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
