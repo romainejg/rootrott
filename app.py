@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import base64
 
+import cv2
 import climate_analyzer
 import calculators
 from box_plot_tools import BoxPlotUI
@@ -698,6 +699,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
