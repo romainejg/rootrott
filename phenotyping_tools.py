@@ -1,159 +1,215 @@
+import io
+from dataclasses import dataclass
+from typing import Optional, Tuple, List
+
 import cv2
 import numpy as np
 import pandas as pd
-from dataclasses import dataclass
-from typing import Tuple, List, Optional
-
 from PIL import Image
 import streamlit as st
 
 
+# ---------------------------------
+# Grid spacing (1 cm squares) helper
+# ---------------------------------
+
+def _estimate_grid_spacing_px(gray: np.ndarray) -> Optional[float]:
+    """
+    Estimate grid spacing (pixels per 1 cm square) using Hough lines.
+    We look for long, nearly horizontal and vertical lines, then take
+    the median spacing between parallel lines.
+    """
+    # Edge detection
+    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+
+    # Probabilistic Hough
+    lines = cv2.HoughLinesP(
+        edges,
+        rho=1,
+        theta=np.pi / 180,
+        threshold=120,
+        minLineLength=120,  # long-ish lines only
+        maxLineGap=10,
+    )
+
+    if lines is None or len(lines) < 10:
+        return None
+
+    vertical_positions = []
+    horizontal_positions = []
+
+    for l in lines:
+        x1, y1, x2, y2 = l[0]
+        dx = x2 - x1
+        dy = y2 - y1
+        length = np.hypot(dx, dy)
+
+        if length < 80:
+            continue
+
+        # Vertical-ish
+        if abs(dx) < abs(dy) * 0.3:
+            vertical_positions.extend([x1, x2])
+        # Horizontal-ish
+        elif abs(dy) < abs(dx) * 0.3:
+            horizontal_positions.extend([y1, y2])
+
+    spacings: List[float] = []
+
+    for positions in (vertical_positions, horizontal_positions):
+        if len(positions) < 6:
+            continue
+        positions = sorted(positions)
+        diffs = np.diff(positions)
+        # Filter out tiny and huge gaps
+        diffs = [d for d in diffs if 10 < d < 200]
+        if diffs:
+            spacings.extend(diffs)
+
+    if not spacings:
+        return None
+
+    return float(np.median(spacings))
+
+
+# ---------------------------
+# Leaf segmentation (watershed)
+# ---------------------------
+
 @dataclass
 class LeafMeasurement:
     leaf_id: int
+    area_px: int
     area_cm2: float
+    height_px: int
     height_cm: float
-    area_height_ratio: float
+    area_per_height: float
 
 
-def _auto_grid_spacing_projection(gray: np.ndarray) -> Optional[float]:
-    """Estimate grid spacing (in pixels) using edge projections."""
-    # Focus on central region to avoid rulers/borders
-    h, w = gray.shape
-    y0, y1 = int(0.1 * h), int(0.9 * h)
-    x0, x1 = int(0.1 * w), int(0.9 * w)
-    roi = gray[y0:y1, x0:x1]
-
-    # Edge detection
-    edges = cv2.Canny(roi, 50, 150)
-
-    # Project edges horizontally and vertically
-    col_sum = edges.sum(axis=0)
-    row_sum = edges.sum(axis=1)
-
-    def _estimate_from_projection(signal: np.ndarray) -> Optional[float]:
-        if signal.max() == 0:
-            return None
-        # Normalize
-        s = (signal - signal.min()) / (signal.max() - signal.min() + 1e-6)
-        # Threshold to keep strong lines
-        mask = s > 0.4
-        idx = np.where(mask)[0]
-        if len(idx) < 10:
-            return None
-        # Find run boundaries -> approximate grid line centers
-        centers: List[int] = []
-        run_start = idx[0]
-        prev = idx[0]
-        for i in idx[1:]:
-            if i == prev + 1:
-                prev = i
-                continue
-            # close run
-            centers.append((run_start + prev) // 2)
-            run_start = i
-            prev = i
-        centers.append((run_start + prev) // 2)
-        if len(centers) < 5:
-            return None
-        diffs = np.diff(centers)
-        # Filter outliers
-        m = np.median(diffs)
-        diffs = diffs[(diffs > 0.5 * m) & (diffs < 1.5 * m)]
-        if len(diffs) == 0:
-            return None
-        return float(np.median(diffs))
-
-    dx = _estimate_from_projection(col_sum)
-    dy = _estimate_from_projection(row_sum)
-
-    candidates = [v for v in (dx, dy) if v is not None]
-    if not candidates:
-        return None
-    return float(np.mean(candidates))
-
-
-def _segment_leaves(image_bgr: np.ndarray, vcrop_start: float = 0.4) -> np.ndarray:
+def _segment_leaves_watershed(bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Segment leaves using HSV thresholding, focusing on lower part of the image
-    where leaves usually are. Returns binary mask (uint8 0/255).
+    Segment leaves using color threshold + watershed.
+    Returns:
+      - markers labeled image (int32)
+      - cleaned binary mask (uint8 0/255)
     """
-    h, w, _ = image_bgr.shape
-    y_start = int(vcrop_start * h)
-    roi = image_bgr[y_start:, :]
+    # HSV threshold for green foliage
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
 
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    # These ranges work nicely for typical lettuce images on white boards.
+    lower = np.array([25, 30, 40])   # H, S, V
+    upper = np.array([90, 255, 255])
+    mask = cv2.inRange(hsv, lower, upper)
 
-    # Green-ish range (tuneable later if needed)
-    lower_green = np.array([30, 40, 40])
-    upper_green = np.array([90, 255, 255])
-    mask = cv2.inRange(hsv, lower_green, upper_green)
-
-    # Morphological cleanup
+    # Morphological cleaning
     kernel = np.ones((5, 5), np.uint8)
-    mask_clean = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
-    mask_clean = cv2.morphologyEx(mask_clean, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask_clean = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, 2)
+    mask_clean = cv2.morphologyEx(mask_clean, cv2.MORPH_CLOSE, kernel, 2)
 
-    # Put ROI mask back into full-size mask
-    full_mask = np.zeros((h, w), dtype=np.uint8)
-    full_mask[y_start:, :] = mask_clean
-    return full_mask
+    # Remove small noise
+    contours, _ = cv2.findContours(mask_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    big_mask = np.zeros_like(mask_clean)
+    for cnt in contours:
+        if cv2.contourArea(cnt) > 500:  # area threshold
+            cv2.drawContours(big_mask, [cnt], -1, 255, thickness=-1)
+    mask_clean = big_mask
+
+    # Distance transform
+    dist = cv2.distanceTransform(mask_clean, cv2.DIST_L2, 5)
+    dist_norm = cv2.normalize(dist, None, 0, 1.0, cv2.NORM_MINMAX)
+
+    # Foreground markers from peaks
+    _, sure_fg = cv2.threshold(dist_norm, 0.35, 1.0, cv2.THRESH_BINARY)
+    sure_fg_uint8 = (sure_fg * 255).astype("uint8")
+
+    # Background and unknown
+    sure_bg = cv2.dilate(mask_clean, kernel, iterations=3)
+    unknown = cv2.subtract(sure_bg, sure_fg_uint8)
+
+    # Connected components for markers
+    _, markers = cv2.connectedComponents(sure_fg_uint8)
+    markers = markers + 1
+    markers[unknown == 255] = 0
+
+    # Watershed on original color image
+    ws_input = bgr.copy()
+    markers = cv2.watershed(ws_input, markers)
+
+    # markers: -1 = boundary, 0 = background, 2..N = leaves
+    return markers, mask_clean
 
 
-def _measure_leaves(
-    mask: np.ndarray,
-    px_per_cm: float,
-    min_area_cm2: float = 1.0,
-) -> Tuple[List[LeafMeasurement], np.ndarray]:
+def _measure_leaves(markers: np.ndarray, px_per_cm: float) -> Tuple[List[LeafMeasurement], np.ndarray]:
     """
-    From a binary mask, find connected leaves and measure area/height.
-    Returns list of LeafMeasurement and an overlay image with contours drawn.
+    Measure each leaf based on watershed markers.
+    Returns list of LeafMeasurement + BGR overlay image with boxes & labels.
     """
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-        mask, connectivity=8
-    )
-    h, w = mask.shape
-    overlay = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+    overlay = np.zeros((markers.shape[0], markers.shape[1], 3), dtype=np.uint8)
+    overlay[:] = (0, 0, 0)
 
-    leaves: List[LeafMeasurement] = []
-    leaf_id = 1
-    px_per_cm2 = px_per_cm**2
+    measurements: List[LeafMeasurement] = []
+    leaf_ids = [lab for lab in np.unique(markers) if lab > 1]  # ignore boundary (-1), bg (0), "1"
 
-    for label in range(1, num_labels):
-        area_px = stats[label, cv2.CC_STAT_AREA]
-        if area_px < min_area_cm2 * px_per_cm2:
+    for i, lab in enumerate(sorted(leaf_ids), start=1):
+        ys, xs = np.where(markers == lab)
+        if len(xs) == 0:
             continue
 
-        x = stats[label, cv2.CC_STAT_LEFT]
-        y = stats[label, cv2.CC_STAT_TOP]
-        bw = stats[label, cv2.CC_STAT_WIDTH]
-        bh = stats[label, cv2.CC_STAT_HEIGHT]
+        x_min, x_max = xs.min(), xs.max()
+        y_min, y_max = ys.min(), ys.max()
 
-        area_cm2 = area_px / px_per_cm2
-        height_cm = bh / px_per_cm
-        ratio = area_cm2 / height_cm if height_cm > 0 else 0.0
+        height_px = y_max - y_min + 1
+        area_px = len(xs)
 
-        leaves.append(LeafMeasurement(leaf_id, area_cm2, height_cm, ratio))
+        if px_per_cm <= 0:
+            area_cm2 = float("nan")
+            height_cm = float("nan")
+        else:
+            area_cm2 = area_px / (px_per_cm ** 2)
+            height_cm = height_px / px_per_cm
 
-        # Draw bounding box + ID
-        cv2.rectangle(overlay, (x, y), (x + bw, y + bh), (0, 255, 0), 2)
+        area_per_height = area_cm2 / height_cm if (height_cm and height_cm > 0) else float("nan")
+
+        # Draw box + id on overlay (white leaves, green boxes)
+        overlay[markers == lab] = (255, 255, 255)
+        cv2.rectangle(
+            overlay,
+            (x_min, y_min),
+            (x_max, y_max),
+            (0, 255, 0),
+            2,
+        )
         cv2.putText(
             overlay,
-            str(leaf_id),
-            (x, max(0, y - 5)),
+            str(i),
+            (x_min + 3, y_min + 18),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
             (0, 255, 0),
             2,
-            cv2.LINE_AA,
+            lineType=cv2.LINE_AA,
         )
-        leaf_id += 1
 
-    return leaves, overlay
+        measurements.append(
+            LeafMeasurement(
+                leaf_id=i,
+                area_px=area_px,
+                area_cm2=area_cm2,
+                height_px=height_px,
+                height_cm=height_cm,
+                area_per_height=area_per_height,
+            )
+        )
 
+    return measurements, overlay
+
+
+# -----------------------------
+# Streamlit UI: Phenotyping tab
+# -----------------------------
 
 class PhenotypingUI:
-    """Streamlit UI for leaf phenotyping on a 1 cm grid background."""
+    """Leaf phenotyping tool with watershed segmentation and automatic grid calibration."""
 
     @classmethod
     def render(cls):
@@ -161,119 +217,144 @@ class PhenotypingUI:
 
         st.markdown(
             """
-            Upload an image of leaves on a **1 cm grid board**.  
-            Rootweiler will:
-            - estimate the grid spacing to convert pixels → cm  
-            - segment individual leaves (even with some overlap)  
-            - measure area, height, and area/height ratio per leaf
+            Upload an image on a **1 cm² grid board**. Rootweiler will:
+
+            - Detect the grid spacing → **pixels per centimetre**  
+            - Segment individual leaves (even when they touch) using **watershed**  
+            - Measure each leaf:
+              - Area (cm²)
+              - Height (cm)
+              - Area : height ratio  
+            - Summarise average size & variability
             """
         )
 
-        uploaded = st.file_uploader("Upload leaf image", type=["jpg", "jpeg", "png"])
-        if uploaded is None:
-            st.info("Upload a photo of the grid board with leaves to begin.")
-            return
-
-        pil_img = Image.open(uploaded).convert("RGB")
-        image_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-
-        # ---------- Grid calibration ----------
-        with st.expander("Grid calibration (1 cm squares)", expanded=True):
-            auto_spacing = _auto_grid_spacing_projection(gray)
-
-            if auto_spacing is not None and auto_spacing > 3:
-                st.success(
-                    f"Auto-detected grid spacing: ~{auto_spacing:0.1f} px per 1 cm"
-                )
-                default_px_cm = float(auto_spacing)
-            else:
-                st.warning(
-                    "Could not confidently detect grid spacing automatically. "
-                    "Use the manual control below."
-                )
-                h, w = gray.shape
-                # Assume ~30 squares across as a fallback
-                default_px_cm = w / 30.0
-
-            h, w = gray.shape
-            st.markdown(
-                f"<small>Image size: {w} × {h} px. Adjust the slider if the auto value looks off.</small>",
-                unsafe_allow_html=True,
-            )
-
-            px_per_cm = st.slider(
-                "Pixels per centimetre",
-                min_value=10.0,
-                max_value=200.0,
-                value=float(default_px_cm),
-                step=0.5,
-            )
-
-            st.caption(
-                "Tip: one grid square is 1 cm. "
-                "If you know the number of squares across the image, "
-                "px/cm = image_width_px ÷ squares_across."
-            )
-
-        # ---------- Segmentation ----------
-        st.markdown("### Segmentation preview")
-
-        vcrop = st.slider(
-            "Vertical crop start (for leaf region)",
-            min_value=0.0,
-            max_value=0.8,
-            value=0.4,
-            step=0.05,
-            help=(
-                "Everything above this fraction of the image height is ignored "
-                "for leaf segmentation."
-            ),
+        uploaded = st.file_uploader(
+            "Upload bench image",
+            type=["jpg", "jpeg", "png"],
+            help="Photo of leaves on a 1 cm grid board.",
         )
 
-        mask = _segment_leaves(image_bgr, vcrop_start=vcrop)
-        leaves, overlay = _measure_leaves(mask, px_per_cm=px_per_cm, min_area_cm2=1.0)
+        if uploaded is None:
+            st.info("Upload an image to begin.")
+            return
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Segmented leaves**")
-            st.image(
-                cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB),
-                use_column_width=True,
-            )
+        # Read via PIL then convert to OpenCV BGR
+        pil_img = Image.open(uploaded).convert("RGB")
+        img_rgb = np.array(pil_img)
+        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
-        with col2:
-            st.markdown("**Binary mask**")
-            st.image(mask, use_column_width=True, clamp=True)
+        # Grayscale for grid detection
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
-        # ---------- Measurements ----------
-        st.markdown("### Leaf measurements")
+        # Auto grid calibration
+        px_per_cm_auto = _estimate_grid_spacing_px(gray)
 
-        if not leaves:
-            st.warning(
-                "No leaves detected with current settings. You can try:\n"
-                "- lowering the vertical crop start\n"
-                "- retaking the photo with stronger contrast\n"
-                "- or, if you're comfortable editing code, adjusting the green HSV thresholds."
+        with st.expander("Grid calibration (1 cm squares)", expanded=True):
+            if px_per_cm_auto is not None:
+                st.success(
+                    f"Auto-detected grid spacing: **~{px_per_cm_auto:.1f} px per 1 cm**"
+                )
+                px_per_cm = st.number_input(
+                    "Pixels per centimetre (edit if needed)",
+                    min_value=1.0,
+                    max_value=500.0,
+                    value=float(round(px_per_cm_auto, 1)),
+                    step=0.5,
+                )
+            else:
+                st.warning(
+                    "Could not reliably detect grid spacing. "
+                    "Please enter pixels per centimetre manually."
+                )
+                px_per_cm = st.number_input(
+                    "Pixels per centimetre",
+                    min_value=1.0,
+                    max_value=500.0,
+                    value=60.0,
+                    step=0.5,
+                )
+
+        if st.button("Run phenotyping", type="primary"):
+            cls._run_phenotyping(img_rgb, img_bgr, px_per_cm)
+
+    @classmethod
+    def _run_phenotyping(cls, img_rgb: np.ndarray, img_bgr: np.ndarray, px_per_cm: float):
+        # Watershed segmentation
+        markers, mask_clean = _segment_leaves_watershed(img_bgr)
+
+        # Measurements
+        measurements, overlay = _measure_leaves(markers, px_per_cm)
+
+        if not measurements:
+            st.error(
+                "No leaves were detected. Try adjusting lighting, background, or the image."
             )
             return
 
-        rows = []
-        for lm in leaves:
-            rows.append(
+        # Convert images for display
+        overlay_rgb = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
+        mask_rgb = cv2.cvtColor(mask_clean, cv2.COLOR_GRAY2RGB)
+
+        st.markdown("### Segmentation overview")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown("**Original image**")
+            st.image(img_rgb, use_column_width=True)
+        with c2:
+            st.markdown("**Leaf labels**")
+            st.image(overlay_rgb, use_column_width=True)
+        with c3:
+            st.markdown("**Binary mask**")
+            st.image(mask_rgb, use_column_width=True)
+
+        # Build table
+        df = pd.DataFrame(
+            [
                 {
-                    "Leaf ID": lm.leaf_id,
-                    "Area (cm²)": round(lm.area_cm2, 2),
-                    "Height (cm)": round(lm.height_cm, 2),
-                    "Area : height (cm)": round(lm.area_height_ratio, 2),
+                    "Leaf ID": m.leaf_id,
+                    "Area (px)": m.area_px,
+                    "Area (cm²)": round(m.area_cm2, 2) if np.isfinite(m.area_cm2) else np.nan,
+                    "Height (px)": m.height_px,
+                    "Height (cm)": round(m.height_cm, 2) if np.isfinite(m.height_cm) else np.nan,
+                    "Area : height (cm)": round(m.area_per_height, 2)
+                    if np.isfinite(m.area_per_height)
+                    else np.nan,
                 }
-            )
-        df = pd.DataFrame(rows)
+                for m in measurements
+            ]
+        )
+
+        st.markdown("### Leaf measurements")
         st.dataframe(df, use_container_width=True)
 
         # Summary stats
-        st.markdown("#### Summary statistics")
-        st.write(f"- Leaf count: **{len(leaves)}**")
-        st.write(f"- Mean area: **{df['Area (cm²)'].mean():.2f} cm²**")
-        st.write(f"- Area standard deviation: **{df['Area (cm²)'].std():.2f} cm²**")
-        st.write(f"- Mean height: **{df['Height (cm)'].mean():.2f} cm**")
+        st.markdown("### Summary")
+        areas = df["Area (cm²)"].to_numpy(dtype=float)
+        heights = df["Height (cm)"].to_numpy(dtype=float)
+
+        def _safe_stats(arr: np.ndarray) -> Tuple[float, float]:
+            arr = arr[np.isfinite(arr)]
+            if arr.size == 0:
+                return float("nan"), float("nan")
+            return float(np.mean(arr)), float(np.std(arr, ddof=1)) if arr.size > 1 else (float(np.mean(arr)), 0.0)
+
+        mean_area, sd_area = _safe_stats(areas)
+        mean_height, sd_height = _safe_stats(heights)
+
+        st.write(f"- **Leaf count:** {len(df)}")
+        if np.isfinite(mean_area):
+            st.write(
+                f"- **Average leaf area:** {mean_area:.2f} cm² "
+                f"(SD: {sd_area:.2f} cm²)"
+            )
+        if np.isfinite(mean_height):
+            st.write(
+                f"- **Average leaf height:** {mean_height:.2f} cm "
+                f"(SD: {sd_height:.2f} cm)"
+            )
+
+        st.caption(
+            "Each square on the board is treated as 1 cm². "
+            "Leaf height is measured along the vertical axis of the board, from tip to base of the segmented region."
+        )
