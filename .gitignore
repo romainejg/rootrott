@@ -1,0 +1,17 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+
+# Virtual environment files
+venv/
+.venv/
+env/
+.env
+
+# Streamlit secrets (CRUCIAL for security)
+# This prevents your API keys from being committed to GitHub.
+.streamlit/secrets.toml
+
+# Operating System files
+.DS_Store
+Thumbs.db
