@@ -1,17 +1,22 @@
 # phenotyping.py
 
-import os
-from typing import List, Tuple, Optional, Dict, Any
+from typing import Optional, List, Tuple
 
 import numpy as np
-import pandas as pd
+from PIL import Image, ImageDraw
 import streamlit as st
-from PIL import Image
 
+# Roboflow client
+from inference_sdk import InferenceHTTPClient
+
+# Try to import OpenCV *optionally*
 try:
-    from inference_sdk import InferenceHTTPClient
+    import cv2  # type: ignore
+    HAS_CV2 = True
 except ImportError:
-    InferenceHTTPClient = None  # we will check at runtime
+    cv2 = None  # type: ignore
+    HAS_CV2 = False
+
 
 # -------------------------------
 # Roboflow configuration
@@ -336,7 +341,21 @@ class PhenotypingUI:
 
     @classmethod
     def render(cls):
+class PhenotypingUI:
+    @classmethod
+    def render(cls):
         st.subheader("Leaf phenotyping")
+
+        if not HAS_CV2:
+            st.error(
+                "Leaf phenotyping needs OpenCV (`opencv-python-headless`) which "
+                "is not available in this environment.\n\n"
+                "Your other Rootweiler tools will still work, but this feature "
+                "requires that package."
+            )
+            return
+
+        # ... rest of your UI code that uses cv2 ...
 
         st.markdown(
             """
