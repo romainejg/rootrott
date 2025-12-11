@@ -16,6 +16,8 @@ import debugger
 import climate_analyzer
 from box_plot_tools import BoxPlotUI
 from imaging_tools import ImagingToolsUI
+from nutrient_tools import NutrientToolsUI
+
 
 
 # -----------------------
@@ -700,6 +702,8 @@ def main():
         render_climate()
     elif section == "Phenotyping":
         render_phenotyping()
+    elif section == "Nutrients":
+        NutrientToolsUI.render()
     elif section == "Data & Graphs":
         BoxPlotUI.render()
     elif section == "Imaging":
@@ -711,6 +715,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
