@@ -12,9 +12,9 @@ import calculators
 
 import leafAnalysis
 import jpgExtract
-import boxing
 import debugger
 import climate_analyzer
+from box_plot_tools import BoxPlotUI
 from imaging_tools import ImagingToolsUI
 
 
@@ -701,7 +701,7 @@ def main():
     elif section == "Phenotyping":
         render_phenotyping()
     elif section == "Data & Graphs":
-        render_data_graphs()
+        BoxPlotUI.render()
     elif section == "Imaging":
         ImagingToolsUI.render()
 
@@ -711,6 +711,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
