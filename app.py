@@ -216,7 +216,7 @@ def inject_css():
 
 def sidebar_nav():
     script_dir = get_script_dir()
-    logo_path = os.path.join(script_dir, "logo.png")
+    logo_path = os.path.join(script_dir, "assets", "logo.png")
 
     with st.sidebar:
 
@@ -272,8 +272,8 @@ def sidebar_nav():
 
 def render_home():
     script_dir = get_script_dir()
-    lettuce1 = os.path.join(script_dir, "lettuce1.jpg")
-    logo_path = os.path.join(script_dir, "logo.png")
+    lettuce1 = os.path.join(script_dir, "assets", "lettuce1.jpg")
+    logo_path = os.path.join(script_dir, "assets", "logo.png")
 
     # Small icon row at very top of page
     st.markdown(
