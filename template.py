@@ -49,7 +49,7 @@ class BoxingApp:
         style = ttk.Style()
         style.configure('TButton', font=self.button_font, padding=10)
 
-        run_button = ttk.Button(frame, text="Run boxing.py", command=self.placeholder_function, style='TButton')
+        run_button = ttk.Button(frame, text="Run script", command=self.placeholder_function, style='TButton')
         run_button.pack(pady=10, fill="x")
 
         back_button = ttk.Button(frame, text="Back", command=self.back_to_main, style='TButton')
