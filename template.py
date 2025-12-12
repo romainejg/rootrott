@@ -34,7 +34,7 @@ class BoxingApp:
         subtext_label.pack(pady=10)
 
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        logo_path = os.path.join(script_dir, "logo.png")
+        logo_path = os.path.join(script_dir, "assets", "logo.png")
 
         try:
             logo_image = Image.open(logo_path)
