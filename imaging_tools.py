@@ -575,7 +575,13 @@ class ImagingToolsUI:
         
         if use_manual_mode:
             # Fallback: manual bbox input
-            st.warning("streamlit-drawable-canvas not available. Using manual input mode.")
+            if CANVAS_AVAILABLE:
+                # Canvas was available but failed - already showed error message above
+                pass
+            else:
+                # Canvas library not installed
+                st.warning("streamlit-drawable-canvas not available. Using manual input mode.")
+            
             st.caption("Enter the bounding box coordinates manually.")
             
             col1, col2 = st.columns(2)
