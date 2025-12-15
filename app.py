@@ -339,7 +339,6 @@ def render_calculators():
             "Vapor Pressure Deficit (VPD)",
             "Plants per m²",
             "Unit Converter",
-            "Canopy Closure", 
         ]
     )
 
@@ -355,9 +354,6 @@ def render_calculators():
     with tabs[3]:
         calculators.UnitConverterCalculator.render()
 
-    with tabs[4]:
-        calculators.CanopyClosureCalculator.render()
-
 
 
 # -----------------------
@@ -367,13 +363,14 @@ def render_calculators():
 def render_climate():
     st.markdown("## Climate")
 
-    tabs = st.tabs(["Climate Analyzer", "Feedback Loop Builder"])
+    tabs = st.tabs(["Climate Analyzer", "Canopy Closure*"])
 
     with tabs[0]:
         climate_analyzer.ClimateAnalyzerUI.render()
 
     with tabs[1]:
-        climate_analyzer.ClimateFeedbackLoopUI.render()
+        st.markdown("**\\* Under construction**")
+        calculators.CanopyClosureCalculator.render()
 
 
 # -----------------------
