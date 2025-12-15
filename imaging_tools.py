@@ -6,7 +6,7 @@ import zipfile
 from typing import List, Tuple
 
 import streamlit as st
-from PIL import Image, ImageDraw
+from PIL import Image
 import numpy as np
 
 # For document image extraction
@@ -16,78 +16,6 @@ from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 import openpyxl
 
-# For canvas drawing
-try:
-    from streamlit_drawable_canvas import st_canvas
-    CANVAS_AVAILABLE = True
-except ImportError:
-    CANVAS_AVAILABLE = False
-
-
-# ----------------- Helper functions for Object Crop tool ----------------- #
-
-def crop_square_png(image: Image.Image, bbox: Tuple[int, int, int, int], pad_factor: float = 1.1) -> Image.Image:
-    """
-    Crop a square region from an image centered on the given bounding box.
-    
-    Args:
-        image: Input PIL Image
-        bbox: Bounding box as (x0, y0, x1, y1) - top-left and bottom-right corners
-        pad_factor: Padding factor to expand the square (default 1.1 = 110% of bbox size)
-    
-    Returns:
-        Square PIL Image in RGBA mode with transparent padding if needed
-    """
-    x0, y0, x1, y1 = bbox
-    
-    # Normalize coordinates
-    x0, x1 = min(x0, x1), max(x0, x1)
-    y0, y1 = min(y0, y1), max(y0, y1)
-    
-    # Calculate bbox dimensions and center
-    bbox_width = x1 - x0
-    bbox_height = y1 - y0
-    center_x = (x0 + x1) / 2
-    center_y = (y0 + y1) / 2
-    
-    # Calculate square side length (max dimension * padding factor)
-    square_side = max(bbox_width, bbox_height) * pad_factor
-    half_side = square_side / 2
-    
-    # Calculate square crop bounds (can extend beyond image)
-    crop_x0 = int(center_x - half_side)
-    crop_y0 = int(center_y - half_side)
-    crop_x1 = int(center_x + half_side)
-    crop_y1 = int(center_y + half_side)
-    
-    # Get image dimensions
-    img_width, img_height = image.size
-    
-    # Convert image to RGBA to support transparency
-    if image.mode != 'RGBA':
-        image = image.convert('RGBA')
-    
-    # Create a new square image with transparent background
-    output_size = int(square_side)
-    output_img = Image.new('RGBA', (output_size, output_size), (0, 0, 0, 0))
-    
-    # Calculate paste position (offset if crop extends beyond image bounds)
-    paste_x = max(0, -crop_x0)
-    paste_y = max(0, -crop_y0)
-    
-    # Calculate source crop region (clamped to image bounds)
-    src_x0 = max(0, crop_x0)
-    src_y0 = max(0, crop_y0)
-    src_x1 = min(img_width, crop_x1)
-    src_y1 = min(img_height, crop_y1)
-    
-    # Crop the region from source image
-    if src_x1 > src_x0 and src_y1 > src_y0:
-        cropped_region = image.crop((src_x0, src_y0, src_x1, src_y1))
-        output_img.paste(cropped_region, (paste_x, paste_y))
-    
-    return output_img
-
 
 class ImagingToolsUI:
     """Imaging utilities for the Rootweiler 'Imaging' section."""
@@ -96,16 +24,13 @@ class ImagingToolsUI:
     def render(cls):
         st.subheader("Imaging")
 
-        tabs = st.tabs(["Image extractor", "Compressor", "Object Crop (Square PNG)"])
+        tabs = st.tabs(["Image extractor", "Compressor"])
 
         with tabs[0]:
             cls._render_extractor()
 
         with tabs[1]:
             cls._render_compressor()
-
-        with tabs[2]:
-            cls._render_object_crop()
 
     # ------------------------------------------------------------------
     # IMAGE EXTRACTOR
@@ -452,177 +377,3 @@ class ImagingToolsUI:
                 low_q = q + 1
 
         return best_bytes or b""
-
-    # ------------------------------------------------------------------
-    # OBJECT CROP (SQUARE PNG)
-    # ------------------------------------------------------------------
-    @classmethod
-    def _render_object_crop(cls):
-        st.markdown(
-            """
-            ### Object Crop (Square PNG)
-            
-            Upload an image, select an object region, and export a centered square PNG 
-            with transparent padding if needed.
-            """
-        )
-
-        uploaded_image = st.file_uploader(
-            "Upload an image",
-            type=["png", "jpg", "jpeg", "bmp", "webp"],
-            key="object_crop_uploader",
-        )
-
-        if uploaded_image is None:
-            st.info("Upload an image to get started.")
-            return
-
-        # Load the image
-        try:
-            img = Image.open(uploaded_image)
-            img_array = np.array(img.convert('RGB'))
-        except Exception as e:
-            st.error(f"Could not load image: {e}")
-            return
-
-        st.markdown("#### Select object region")
-        
-        # Padding factor slider
-        pad_factor = st.slider(
-            "Padding factor",
-            min_value=1.0,
-            max_value=2.0,
-            value=1.1,
-            step=0.05,
-            help="How much space around the object (1.0 = tight crop, 2.0 = 2x the object size)"
-        )
-
-        # Choose interaction method
-        use_manual_mode = False
-        
-        if CANVAS_AVAILABLE:
-            try:
-                st.caption("Draw a rectangle around the object you want to crop.")
-                
-                # Get image dimensions
-                height, width = img_array.shape[:2]
-                
-                # Scale canvas to fit screen (max 700px wide)
-                max_canvas_width = 700
-                if width > max_canvas_width:
-                    scale = max_canvas_width / width
-                    canvas_width = max_canvas_width
-                    canvas_height = int(height * scale)
-                else:
-                    scale = 1.0
-                    canvas_width = width
-                    canvas_height = height
-                
-                # Create canvas for drawing
-                canvas_result = st_canvas(
-                    fill_color="rgba(255, 0, 0, 0.0)",  # Transparent fill
-                    stroke_width=2,
-                    stroke_color="#FF0000",
-                    background_image=Image.fromarray(img_array),
-                    update_streamlit=True,
-                    height=canvas_height,
-                    width=canvas_width,
-                    drawing_mode="rect",
-                    key="object_crop_canvas",
-                )
-                
-                # Process canvas result
-                if canvas_result.json_data is not None:
-                    objects = canvas_result.json_data.get("objects", [])
-                    
-                    if len(objects) == 0:
-                        st.info("Draw a rectangle on the image to select the object region.")
-                        return
-                    
-                    # Get the last drawn rectangle
-                    rect = objects[-1]
-                    
-                    # Extract coordinates and scale back to original image size
-                    canvas_x0 = rect["left"]
-                    canvas_y0 = rect["top"]
-                    canvas_width_rect = rect["width"]
-                    canvas_height_rect = rect["height"]
-                    
-                    # Scale back to original image coordinates
-                    # Guard against division by zero (though scale should always be > 0)
-                    if scale > 0:
-                        x0 = int(canvas_x0 / scale)
-                        y0 = int(canvas_y0 / scale)
-                        x1 = int((canvas_x0 + canvas_width_rect) / scale)
-                        y1 = int((canvas_y0 + canvas_height_rect) / scale)
-                    else:
-                        x0, y0, x1, y1 = 0, 0, width, height
-                    
-                    bbox = (x0, y0, x1, y1)
-                    
-                    st.markdown(f"**Selected region:** ({x0}, {y0}) to ({x1}, {y1})")
-                    
-                else:
-                    st.info("Draw a rectangle on the image to select the object region.")
-                    return
-                    
-            except AttributeError:
-                # Canvas component incompatibility - fall back to manual mode
-                st.error("Canvas component compatibility issue detected. Using manual bounding box entry instead.")
-                use_manual_mode = True
-        else:
-            use_manual_mode = True
-        
-        if use_manual_mode:
-            # Fallback: manual bbox input
-            if CANVAS_AVAILABLE:
-                # Canvas was available but failed - already showed error message above
-                pass
-            else:
-                # Canvas library not installed
-                st.warning("streamlit-drawable-canvas not available. Using manual input mode.")
-            
-            st.caption("Enter the bounding box coordinates manually.")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                x0 = st.number_input("Top-left X", min_value=0, max_value=img.width, value=0, step=1)
-                y0 = st.number_input("Top-left Y", min_value=0, max_value=img.height, value=0, step=1)
-            with col2:
-                x1 = st.number_input("Bottom-right X", min_value=0, max_value=img.width, value=min(100, img.width), step=1)
-                y1 = st.number_input("Bottom-right Y", min_value=0, max_value=img.height, value=min(100, img.height), step=1)
-            
-            bbox = (x0, y0, x1, y1)
-            
-            # Show preview with bbox
-            preview_img = img.copy()
-            draw = ImageDraw.Draw(preview_img)
-            draw.rectangle([x0, y0, x1, y1], outline="red", width=3)
-            st.image(preview_img, caption="Preview with bounding box", use_container_width=True)
-
-        # Generate cropped square
-        try:
-            cropped_square = crop_square_png(img, bbox, pad_factor)
-            
-            st.markdown("#### Preview")
-            st.image(cropped_square, caption=f"Cropped square ({cropped_square.width}×{cropped_square.height} px)", use_container_width=True)
-            
-            # Prepare download
-            output_buffer = io.BytesIO()
-            cropped_square.save(output_buffer, format="PNG")
-            output_buffer.seek(0)
-            
-            # Generate filename
-            original_name = os.path.splitext(uploaded_image.name)[0]
-            output_filename = f"{original_name}_square_crop.png"
-            
-            st.download_button(
-                "Download square PNG",
-                data=output_buffer,
-                file_name=output_filename,
-                mime="image/png",
-                key="download_square_crop",
-            )
-            
-        except Exception as e:
-            st.error(f"Could not generate cropped square: {e}")
