@@ -273,9 +273,9 @@ def resample_df(df_work, ts_col, interval, step_seconds):
     
     # Map interval to pandas resample rule
     interval_map = {
-        '1min': '1T',
-        '5min': '5T',
-        '1hour': '1H',
+        '1min': '1min',
+        '5min': '5min',
+        '1hour': '1h',
         '1day': '1D'
     }
     
