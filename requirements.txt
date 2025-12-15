@@ -12,5 +12,5 @@ seaborn
 plotly
 inference-sdk
 scikit-image
-streamlit-drawable-canvas
+streamlit-drawable-canvas==0.9.3
 

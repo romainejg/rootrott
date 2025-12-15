@@ -546,10 +546,14 @@ class ImagingToolsUI:
                 canvas_height_rect = rect["height"]
                 
                 # Scale back to original image coordinates
-                x0 = int(canvas_x0 / scale)
-                y0 = int(canvas_y0 / scale)
-                x1 = int((canvas_x0 + canvas_width_rect) / scale)
-                y1 = int((canvas_y0 + canvas_height_rect) / scale)
+                # Guard against division by zero (though scale should always be > 0)
+                if scale > 0:
+                    x0 = int(canvas_x0 / scale)
+                    y0 = int(canvas_y0 / scale)
+                    x1 = int((canvas_x0 + canvas_width_rect) / scale)
+                    y1 = int((canvas_y0 + canvas_height_rect) / scale)
+                else:
+                    x0, y0, x1, y1 = 0, 0, width, height
                 
                 bbox = (x0, y0, x1, y1)
                 
