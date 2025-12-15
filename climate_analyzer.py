@@ -1,6 +1,7 @@
 # climate_analyzer.py
 
 import io
+import math
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -35,6 +36,265 @@ STRESS_WINDOWS = {
     "low_vpd_min_run": 12,   # consecutive hours of low VPD to flag glassiness/humidity risk
     "high_ppfd_min_run": 4   # consecutive hours of very high PPFD to flag photoinhibition risk
 }
+
+
+# ----------------- File loading and inference helpers ----------------- #
+
+def load_climate_file(uploaded_file):
+    """
+    Load climate data from uploaded CSV or Excel file.
+    Returns (df, source_type) where source_type is "csv" or "excel".
+    """
+    filename = uploaded_file.name.lower()
+    
+    try:
+        if filename.endswith('.csv'):
+            # Try common CSV separators
+            content = uploaded_file.read()
+            uploaded_file.seek(0)
+            
+            # Try comma first (most common)
+            try:
+                df = pd.read_csv(io.BytesIO(content), sep=',')
+                if len(df.columns) > 1:
+                    return df, "csv"
+            except Exception:
+                pass
+            
+            # Try semicolon
+            try:
+                df = pd.read_csv(io.BytesIO(content), sep=';')
+                if len(df.columns) > 1:
+                    return df, "csv"
+            except Exception:
+                pass
+            
+            # Try tab
+            try:
+                df = pd.read_csv(io.BytesIO(content), sep='\t')
+                if len(df.columns) > 1:
+                    return df, "csv"
+            except Exception:
+                pass
+            
+            # Fall back to default pandas detection
+            df = pd.read_csv(io.BytesIO(content))
+            return df, "csv"
+            
+        else:  # Excel
+            df = pd.read_excel(uploaded_file)
+            return df, "excel"
+            
+    except Exception as e:
+        raise ValueError(f"Could not read file: {e}")
+
+
+def infer_timestamp_column(df):
+    """
+    Infer which column is most likely the timestamp.
+    Returns (col_name_or_none, confidence, explanation).
+    """
+    candidates = []
+    
+    for col in df.columns:
+        col_lower = str(col).lower()
+        score = 0
+        reasons = []
+        
+        # Name-based matching
+        if any(keyword in col_lower for keyword in ['timestamp', 'time', 'date', 'datetime']):
+            score += 50
+            reasons.append("name matches timestamp pattern")
+        
+        # Try parsing as datetime
+        try:
+            parsed = pd.to_datetime(df[col], errors='coerce')
+            valid_count = parsed.notna().sum()
+            valid_pct = valid_count / len(df) if len(df) > 0 else 0
+            
+            if valid_pct > 0.8:
+                score += 40
+                reasons.append(f"{valid_pct*100:.0f}% of values parse as datetime")
+            elif valid_pct > 0.5:
+                score += 20
+                reasons.append(f"{valid_pct*100:.0f}% of values parse as datetime")
+        except Exception:
+            pass
+        
+        if score > 0:
+            candidates.append({
+                'col': col,
+                'score': score,
+                'reasons': reasons
+            })
+    
+    if not candidates:
+        return None, 0, "No timestamp column detected"
+    
+    # Pick best candidate
+    best = max(candidates, key=lambda x: x['score'])
+    confidence = min(100, best['score'])
+    explanation = "; ".join(best['reasons'])
+    
+    return best['col'], confidence, explanation
+
+
+def infer_env_columns(df):
+    """
+    Infer VPD, PPFD, and Temperature columns using name matching + value range checks.
+    Returns dict with keys 'vpd', 'ppfd', 'temp', each containing:
+      {'col': name, 'score': confidence, 'explanation': why}
+    """
+    result = {
+        'vpd': {'col': None, 'score': 0, 'explanation': ''},
+        'ppfd': {'col': None, 'score': 0, 'explanation': ''},
+        'temp': {'col': None, 'score': 0, 'explanation': ''}
+    }
+    
+    for col in df.columns:
+        col_lower = str(col).lower()
+        col_data = pd.to_numeric(df[col], errors='coerce').dropna()
+        
+        if len(col_data) == 0:
+            continue
+        
+        mean_val = col_data.mean()
+        min_val = col_data.min()
+        max_val = col_data.max()
+        
+        # VPD detection
+        vpd_score = 0
+        vpd_reasons = []
+        if any(keyword in col_lower for keyword in ['vpd', 'vapor pressure deficit']):
+            vpd_score += 50
+            vpd_reasons.append("name matches 'VPD'")
+        
+        # VPD typically 0-3 kPa, rarely > 5
+        if 0 <= mean_val <= 3 and min_val >= 0 and max_val < 6:
+            vpd_score += 30
+            vpd_reasons.append(f"values in range 0-3 kPa (mean={mean_val:.2f})")
+        
+        if vpd_score > result['vpd']['score']:
+            result['vpd'] = {
+                'col': col,
+                'score': vpd_score,
+                'explanation': "; ".join(vpd_reasons)
+            }
+        
+        # PPFD detection
+        ppfd_score = 0
+        ppfd_reasons = []
+        if any(keyword in col_lower for keyword in ['ppfd', 'par', 'light', 'photon']):
+            ppfd_score += 50
+            ppfd_reasons.append(f"name matches 'PPFD/PAR/light'")
+        
+        # PPFD typically 0-2000 µmol m⁻² s⁻¹
+        if 0 <= mean_val <= 1500 and min_val >= 0 and max_val < 2500:
+            ppfd_score += 30
+            ppfd_reasons.append(f"values in range 0-2000 (mean={mean_val:.0f})")
+        
+        if ppfd_score > result['ppfd']['score']:
+            result['ppfd'] = {
+                'col': col,
+                'score': ppfd_score,
+                'explanation': "; ".join(ppfd_reasons)
+            }
+        
+        # Temperature detection
+        temp_score = 0
+        temp_reasons = []
+        if any(keyword in col_lower for keyword in ['temp', 'temperature', 'tair', 't_air']):
+            temp_score += 50
+            temp_reasons.append("name matches 'temperature'")
+        
+        # Greenhouse temp typically 0-45 °C
+        if 0 <= mean_val <= 45 and min_val >= -5 and max_val < 55:
+            temp_score += 30
+            temp_reasons.append(f"values in range 0-45°C (mean={mean_val:.1f})")
+        
+        if temp_score > result['temp']['score']:
+            result['temp'] = {
+                'col': col,
+                'score': temp_score,
+                'explanation': "; ".join(temp_reasons)
+            }
+    
+    return result
+
+
+def infer_time_step_seconds(ts_series):
+    """
+    Infer the time step from a timestamp series.
+    Returns (step_seconds, label, explanation).
+    """
+    if ts_series is None or ts_series.isna().all():
+        return None, None, "No timestamp data"
+    
+    # Parse and clean
+    ts_clean = pd.to_datetime(ts_series, errors='coerce').dropna().drop_duplicates().sort_values()
+    
+    if len(ts_clean) < 2:
+        return None, None, "Not enough unique timestamps"
+    
+    # Compute deltas
+    deltas = ts_clean.diff().dropna()
+    delta_seconds = deltas.dt.total_seconds()
+    
+    # Use median to be robust against outliers
+    median_seconds = delta_seconds.median()
+    
+    # Create human-readable label
+    if median_seconds < 90:  # Less than 1.5 minutes
+        step_minutes = round(median_seconds / 60)
+        label = f"{max(1, step_minutes)} min"
+    elif median_seconds < 3600:  # Less than 1 hour
+        step_minutes = round(median_seconds / 60)
+        label = f"{step_minutes} min"
+    elif median_seconds < 86400:  # Less than 1 day
+        step_hours = round(median_seconds / 3600)
+        label = f"{step_hours} hour" if step_hours == 1 else f"{step_hours} hours"
+    else:
+        step_days = round(median_seconds / 86400)
+        label = f"{step_days} day" if step_days == 1 else f"{step_days} days"
+    
+    explanation = f"Median time delta: {median_seconds:.0f} seconds ({label})"
+    
+    return median_seconds, label, explanation
+
+
+def resample_df(df_work, ts_col, interval, step_seconds):
+    """
+    Resample dataframe to the specified interval.
+    interval: 'raw', '1min', '5min', '1hour', '1day'
+    Returns resampled dataframe with _ts_ column.
+    """
+    if interval == 'raw' or ts_col is None:
+        return df_work
+    
+    # Map interval to pandas resample rule
+    interval_map = {
+        '1min': '1T',
+        '5min': '5T',
+        '1hour': '1H',
+        '1day': '1D'
+    }
+    
+    rule = interval_map.get(interval)
+    if rule is None:
+        return df_work
+    
+    # Set timestamp as index
+    df_temp = df_work.copy()
+    df_temp = df_temp.set_index(ts_col)
+    
+    # Resample numeric columns using mean
+    df_resampled = df_temp.select_dtypes(include=[np.number]).resample(rule).mean()
+    
+    # Reset index to restore timestamp as column
+    df_resampled = df_resampled.reset_index()
+    df_resampled.columns = ['_ts_'] + [c for c in df_resampled.columns if c != ts_col]
+    
+    return df_resampled
 
 
 # ----------------- Core analysis functions (logic) ----------------- #
@@ -110,46 +370,68 @@ def analyze_series(series: pd.Series, var_label: str, config: dict):
     }
 
 
-def compute_dli_metrics(ppfd_series: pd.Series, timestamp: pd.Series | None):
+def compute_dli_metrics(ppfd_series: pd.Series, timestamp: pd.Series | None, step_seconds: float | None = None):
     """
     Compute daily light integral (DLI) metrics from PPFD.
-    Assumes PPFD is in µmol m⁻² s⁻¹ and samples are hourly.
-    DLI_day = sum(PPFD_hour * 3600) / 1e6 [mol m⁻² d⁻¹]
+    PPFD is in µmol m⁻² s⁻¹.
+    DLI_day = sum(PPFD_sample * step_seconds) / 1e6 [mol m⁻² d⁻¹]
+    
+    Args:
+        ppfd_series: PPFD data
+        timestamp: Timestamp series (if available)
+        step_seconds: Time step in seconds (if known)
     """
     s = pd.to_numeric(ppfd_series, errors="coerce").dropna()
     if len(s) == 0:
         return {"mean_dli": np.nan, "sd_dli": np.nan, "n_days": 0}
 
-    # If we have timestamps, group by date; otherwise approximate by 24-hour blocks.
+    # If we have timestamps, group by date and integrate properly
     if timestamp is not None and not timestamp.isna().all():
         ts_valid = timestamp.loc[s.index]
         df = pd.DataFrame({"ts": ts_valid, "ppfd": s}).dropna(subset=["ts", "ppfd"])
         if df.empty:
             return {"mean_dli": np.nan, "sd_dli": np.nan, "n_days": 0}
+        
         df["date"] = df["ts"].dt.date
+        
+        # Use provided step_seconds or infer it
+        if step_seconds is None:
+            # Try to infer from timestamps
+            ts_sorted = df["ts"].sort_values()
+            if len(ts_sorted) > 1:
+                deltas = ts_sorted.diff().dropna().dt.total_seconds()
+                step_seconds = deltas.median()
+            else:
+                step_seconds = 3600.0  # Default to hourly
+        
         daily = df.groupby("date")["ppfd"].sum()
-        dli_per_day = daily * 3600.0 / 1e6
+        dli_per_day = daily * step_seconds / 1e6
         return {
             "mean_dli": float(dli_per_day.mean()),
             "sd_dli": float(dli_per_day.std()),
             "n_days": int(dli_per_day.shape[0]),
         }
     else:
-        # No timestamps: assume hourly data and approximate days by 24 measurements.
+        # No timestamps: use step_seconds if provided, otherwise assume hourly
+        if step_seconds is None:
+            step_seconds = 3600.0  # Default to hourly
+        
         n = len(s)
-        if n >= 24:
-            day_index = np.floor(np.arange(n) / 24).astype(int)
+        samples_per_day = int(86400 / step_seconds)
+        
+        if n >= samples_per_day:
+            day_index = np.floor(np.arange(n) / samples_per_day).astype(int)
             df = pd.DataFrame({"day": day_index, "ppfd": s.values})
             daily = df.groupby("day")["ppfd"].sum()
-            dli_per_day = daily * 3600.0 / 1e6
+            dli_per_day = daily * step_seconds / 1e6
             return {
                 "mean_dli": float(dli_per_day.mean()),
                 "sd_dli": float(dli_per_day.std()),
                 "n_days": int(dli_per_day.shape[0]),
             }
         else:
-            # Short segment: treat as representative "day" using mean PPFD
-            dli_est = float(s.mean() * 3600.0 * 24.0 / 1e6)
+            # Short segment: estimate using mean PPFD over 24 hours
+            dli_est = float(s.mean() * 86400.0 / 1e6)
             return {"mean_dli": dli_est, "sd_dli": 0.0, "n_days": 1}
 
 
@@ -188,12 +470,16 @@ def _find_segments(cond: pd.Series, min_run: int, ts: pd.Series | None):
         return segments
 
 
-def detect_stress_segments(df_work: pd.DataFrame, ts: pd.Series | None, vpd_col: str, ppfd_col: str):
+def detect_stress_segments(df_work: pd.DataFrame, ts: pd.Series | None, vpd_col: str, ppfd_col: str, step_seconds: float | None = None):
     """
     Detect stress segments for:
     - High VPD (tipburn risk)
     - Low VPD (glassiness / disease risk)
     - Very high PPFD (photoinhibition risk)
+    
+    Args:
+        step_seconds: Time step in seconds; used to convert hour-based windows to point counts
+        
     Returns a list of dicts: {"start": ..., "end": ..., "label": ..., "color": ...}
     """
     segments = []
@@ -204,9 +490,18 @@ def detect_stress_segments(df_work: pd.DataFrame, ts: pd.Series | None, vpd_col:
     vpd = pd.to_numeric(df_work[vpd_col], errors="coerce")
     ppfd = pd.to_numeric(df_work[ppfd_col], errors="coerce")
 
+    # Convert hour-based windows to point counts based on step_seconds
+    # If step_seconds is None, default to hourly (3600s)
+    if step_seconds is None:
+        step_seconds = 3600.0
+    
+    high_vpd_min_points = max(1, math.ceil(STRESS_WINDOWS["high_vpd_min_run"] * 3600 / step_seconds))
+    low_vpd_min_points = max(1, math.ceil(STRESS_WINDOWS["low_vpd_min_run"] * 3600 / step_seconds))
+    high_ppfd_min_points = max(1, math.ceil(STRESS_WINDOWS["high_ppfd_min_run"] * 3600 / step_seconds))
+
     # High VPD stress (tipburn risk)
     high_vpd_cond = vpd > vpd_cfg["stress_high"]
-    high_vpd_runs = _find_segments(high_vpd_cond, STRESS_WINDOWS["high_vpd_min_run"], ts)
+    high_vpd_runs = _find_segments(high_vpd_cond, high_vpd_min_points, ts)
     for start, end in high_vpd_runs:
         segments.append({
             "start": start,
@@ -217,7 +512,7 @@ def detect_stress_segments(df_work: pd.DataFrame, ts: pd.Series | None, vpd_col:
 
     # Low VPD / very humid (glassiness / disease risk)
     low_vpd_cond = vpd < vpd_cfg["optimal_low"]
-    low_vpd_runs = _find_segments(low_vpd_cond, STRESS_WINDOWS["low_vpd_min_run"], ts)
+    low_vpd_runs = _find_segments(low_vpd_cond, low_vpd_min_points, ts)
     for start, end in low_vpd_runs:
         segments.append({
             "start": start,
@@ -228,7 +523,7 @@ def detect_stress_segments(df_work: pd.DataFrame, ts: pd.Series | None, vpd_col:
 
     # Very high PPFD (photoinhibition risk)
     high_ppfd_cond = ppfd > ppfd_cfg["stress_high"]
-    high_ppfd_runs = _find_segments(high_ppfd_cond, STRESS_WINDOWS["high_ppfd_min_run"], ts)
+    high_ppfd_runs = _find_segments(high_ppfd_cond, high_ppfd_min_points, ts)
     for start, end in high_ppfd_runs:
         segments.append({
             "start": start,
@@ -450,7 +745,7 @@ class ClimateAnalyzerUI:
 
         st.markdown(
             """
-            Upload a climate log (Excel) to get a quick overview of how your environment behaves:
+            Upload a climate log (CSV or Excel) to get a quick overview of how your environment behaves:
             - VPD, PPFD and Temperature stability
             - Simple gear classification based on DLI
             - Shaded time series showing stress windows
@@ -458,19 +753,19 @@ class ClimateAnalyzerUI:
         )
 
         uploaded_file = st.file_uploader(
-            "Upload climate Excel file",
-            type=["xlsx", "xls"],
-            help="Typical export with timestamp, VPD, PPFD and temperature columns.",
+            "Upload climate file",
+            type=["xlsx", "xls", "csv"],
+            help="CSV or Excel file with timestamp, VPD, PPFD and temperature columns.",
         )
 
         if uploaded_file is None:
-            st.info("Upload an Excel file to begin.")
+            st.info("Upload a CSV or Excel file to begin.")
             return
 
         try:
-            df = pd.read_excel(uploaded_file)
+            df, source_type = load_climate_file(uploaded_file)
         except Exception as e:
-            st.error(f"Could not read Excel file: {e}")
+            st.error(f"Could not read file: {e}")
             return
 
         if df.empty:
@@ -482,32 +777,85 @@ class ClimateAnalyzerUI:
 
         cols = list(df.columns.astype(str))
 
+        # Auto-detect timestamp column
+        ts_col_inferred, ts_confidence, ts_explanation = infer_timestamp_column(df)
+        
+        # Auto-detect environmental columns
+        env_cols = infer_env_columns(df)
+
+        st.markdown("#### Auto-detected columns")
+        
+        # Show detection results
+        detection_info = []
+        if ts_col_inferred:
+            detection_info.append(f"**Timestamp**: {ts_col_inferred} ({ts_confidence}% confidence - {ts_explanation})")
+        else:
+            detection_info.append(f"**Timestamp**: Not detected")
+        
+        for var_name, var_info in [('VPD', env_cols['vpd']), ('PPFD', env_cols['ppfd']), ('Temperature', env_cols['temp'])]:
+            if var_info['col']:
+                detection_info.append(f"**{var_name}**: {var_info['col']} ({var_info['score']}% confidence - {var_info['explanation']})")
+            else:
+                detection_info.append(f"**{var_name}**: Not detected")
+        
+        for info in detection_info:
+            st.markdown(f"- {info}")
+
         st.markdown("#### Column mapping")
+        st.caption("Review and adjust auto-detected columns if needed:")
 
         c1, c2 = st.columns(2)
         with c1:
+            # Pre-select timestamp if detected
+            ts_options = ["<none>"] + cols
+            if ts_col_inferred and ts_col_inferred in cols:
+                ts_default_idx = ts_options.index(ts_col_inferred)
+            else:
+                ts_default_idx = 0
+            
             ts_col = st.selectbox(
                 "Timestamp column (optional but recommended)",
-                options=["<none>"] + cols,
-                index=0,
+                options=ts_options,
+                index=ts_default_idx,
             )
 
+            # Pre-select VPD if detected
+            if env_cols['vpd']['col'] and env_cols['vpd']['col'] in cols:
+                vpd_default_idx = cols.index(env_cols['vpd']['col'])
+            else:
+                vpd_default_idx = 0
+            
             vpd_col = st.selectbox(
                 "VPD column",
                 options=cols,
+                index=vpd_default_idx,
                 help="kPa",
             )
 
         with c2:
+            # Pre-select PPFD if detected
+            if env_cols['ppfd']['col'] and env_cols['ppfd']['col'] in cols:
+                ppfd_default_idx = cols.index(env_cols['ppfd']['col'])
+            else:
+                ppfd_default_idx = 0
+            
             ppfd_col = st.selectbox(
                 "PPFD column",
                 options=cols,
+                index=ppfd_default_idx,
                 help="µmol m⁻² s⁻¹",
             )
 
+            # Pre-select Temperature if detected
+            if env_cols['temp']['col'] and env_cols['temp']['col'] in cols:
+                temp_default_idx = cols.index(env_cols['temp']['col'])
+            else:
+                temp_default_idx = 0
+            
             temp_col = st.selectbox(
                 "Temperature column",
                 options=cols,
+                index=temp_default_idx,
                 help="°C",
             )
 
@@ -517,6 +865,8 @@ class ClimateAnalyzerUI:
         start_dt = None
         end_dt = None
         ts_series = None
+        step_seconds = None
+        step_label = None
 
         if use_ts:
             try:
@@ -527,6 +877,14 @@ class ClimateAnalyzerUI:
                 use_ts = False
 
         if use_ts and ts_series is not None and not ts_series.isna().all():
+            # Detect time step
+            step_seconds, step_label, step_explanation = infer_time_step_seconds(ts_series)
+            
+            if step_seconds:
+                st.markdown(f"**Time step detected:** {step_label} ({step_explanation})")
+            else:
+                st.info("Could not detect time step from timestamps")
+            
             ts_min = ts_series.min()
             ts_max = ts_series.max()
 
@@ -551,12 +909,22 @@ class ClimateAnalyzerUI:
             # Convert dates to datetimes spanning full days
             start_dt = pd.to_datetime(start_dt)
             end_dt = pd.to_datetime(end_dt) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+            
+            # Add resolution selector
+            st.markdown("#### View resolution")
+            resolution = st.selectbox(
+                "Graph and metrics resolution",
+                options=["Raw", "1 min", "5 min", "1 hour", "1 day"],
+                index=0,
+                help="Resample data to this interval for plotting and metrics calculation"
+            )
 
         else:
             st.markdown(
                 "<small>No valid timestamp selected; analysis uses the full dataset and assumes hourly spacing.</small>",
                 unsafe_allow_html=True,
             )
+            resolution = "Raw"
 
         if st.button("Run climate analysis", type="primary"):
             cls._run_analysis(
@@ -567,10 +935,12 @@ class ClimateAnalyzerUI:
                 temp_col=temp_col,
                 start_dt=start_dt,
                 end_dt=end_dt,
+                resolution=resolution,
+                step_seconds=step_seconds,
             )
 
     @classmethod
-    def _run_analysis(cls, df, ts_series, vpd_col, ppfd_col, temp_col, start_dt, end_dt):
+    def _run_analysis(cls, df, ts_series, vpd_col, ppfd_col, temp_col, start_dt, end_dt, resolution="Raw", step_seconds=None):
         # Work on filtered copy
         df_work = df.copy()
 
@@ -592,6 +962,29 @@ class ClimateAnalyzerUI:
                 if start_dt and end_dt
                 else "Full timestamp range"
             )
+            
+            # Apply resampling if requested
+            if resolution != "Raw":
+                interval_map = {
+                    "1 min": "1min",
+                    "5 min": "5min",
+                    "1 hour": "1hour",
+                    "1 day": "1day"
+                }
+                interval = interval_map.get(resolution, "raw")
+                
+                # Update step_seconds based on resolution
+                resolution_seconds = {
+                    "1 min": 60,
+                    "5 min": 300,
+                    "1 hour": 3600,
+                    "1 day": 86400
+                }
+                step_seconds = resolution_seconds.get(resolution, step_seconds)
+                
+                df_work = resample_df(df_work, "_ts_", interval, step_seconds)
+                ts_for_analysis = df_work["_ts_"]
+                window_desc += f" (resampled to {resolution})"
         else:
             ts_for_analysis = None
             window_desc = "Full dataset (no timestamp)"
@@ -609,7 +1002,7 @@ class ClimateAnalyzerUI:
             metrics_text.append(cls._format_metrics(label, m, config))
 
         # Compute DLI metrics from PPFD
-        dli_metrics = compute_dli_metrics(df_work[ppfd_col], ts_for_analysis)
+        dli_metrics = compute_dli_metrics(df_work[ppfd_col], ts_for_analysis, step_seconds)
 
         # Classification
         env_type, tags = classify_environment(
@@ -644,6 +1037,7 @@ class ClimateAnalyzerUI:
             ts_for_analysis,
             vpd_col=vpd_col,
             ppfd_col=ppfd_col,
+            step_seconds=step_seconds,
         )
 
         fig = plot_time_series(
@@ -671,7 +1065,7 @@ class ClimateAnalyzerUI:
                 return str(x)
 
         lines = [f"--- {label} ---"]
-        lines.append(f" n_hours: {m['n_hours']}  (number of hourly records in this window)")
+        lines.append(f" n_hours: {m['n_hours']}  (number of data points in this window)")
         lines.append(f" mean: {fmt(m['mean'])}  (average {label} over the window)")
         lines.append(f" sd: {fmt(m['sd'])}  (standard deviation — how spread out values are)")
         lines.append(f" cv: {fmt(m['cv'])}  (relative variability; >0.5 means quite variable)")
@@ -698,15 +1092,15 @@ class ClimateAnalyzerUI:
 
         lines.append(
             f" lag1_autocorr: {fmt(m['lag1_autocorr'])}  "
-            f"(how similar each hour is to the previous one; closer to 1 = smoother trends)"
+            f"(how similar each point is to the previous one; closer to 1 = smoother trends)"
         )
         lines.append(
             f" mean_abs_delta: {fmt(m['mean_abs_delta'])}  "
-            f"(average hour-to-hour change in {label})"
+            f"(average point-to-point change in {label})"
         )
         lines.append(
             f" max_abs_delta: {fmt(m['max_abs_delta'])}  "
-            f"(largest single jump between two hours)"
+            f"(largest single jump between two points)"
         )
 
         spike_delta = config.get("spike_delta", None)
