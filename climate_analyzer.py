@@ -56,7 +56,7 @@ def load_climate_file(uploaded_file):
             # Try comma first (most common)
             try:
                 df = pd.read_csv(io.BytesIO(content), sep=',')
-                if len(df.columns) > 1:
+                if len(df.columns) > 1 and len(df) > 0:
                     return df, "csv"
             except Exception:
                 pass
@@ -64,7 +64,7 @@ def load_climate_file(uploaded_file):
             # Try semicolon
             try:
                 df = pd.read_csv(io.BytesIO(content), sep=';')
-                if len(df.columns) > 1:
+                if len(df.columns) > 1 and len(df) > 0:
                     return df, "csv"
             except Exception:
                 pass
@@ -72,13 +72,15 @@ def load_climate_file(uploaded_file):
             # Try tab
             try:
                 df = pd.read_csv(io.BytesIO(content), sep='\t')
-                if len(df.columns) > 1:
+                if len(df.columns) > 1 and len(df) > 0:
                     return df, "csv"
             except Exception:
                 pass
             
             # Fall back to default pandas detection
             df = pd.read_csv(io.BytesIO(content))
+            if len(df.columns) == 1:
+                raise ValueError("Could not detect CSV separator. File may have only one column or use an unusual separator.")
             return df, "csv"
             
         else:  # Excel
@@ -243,10 +245,15 @@ def infer_time_step_seconds(ts_series):
     # Use median to be robust against outliers
     median_seconds = delta_seconds.median()
     
+    # Guard against zero or negative values
+    if median_seconds <= 0:
+        return None, None, "Invalid time deltas detected"
+    
     # Create human-readable label
-    if median_seconds < 90:  # Less than 1.5 minutes
-        step_minutes = round(median_seconds / 60)
-        label = f"{max(1, step_minutes)} min"
+    if median_seconds < 60:  # Less than 1 minute
+        label = f"{int(median_seconds)} sec"
+    elif median_seconds < 90:  # Less than 1.5 minutes
+        label = "1 min"
     elif median_seconds < 3600:  # Less than 1 hour
         step_minutes = round(median_seconds / 60)
         label = f"{step_minutes} min"
@@ -290,9 +297,9 @@ def resample_df(df_work, ts_col, interval, step_seconds):
     # Resample numeric columns using mean
     df_resampled = df_temp.select_dtypes(include=[np.number]).resample(rule).mean()
     
-    # Reset index to restore timestamp as column
+    # Reset index to restore timestamp as column named _ts_
     df_resampled = df_resampled.reset_index()
-    df_resampled.columns = ['_ts_'] + [c for c in df_resampled.columns if c != ts_col]
+    df_resampled = df_resampled.rename(columns={ts_col: '_ts_'})
     
     return df_resampled
 
@@ -491,13 +498,16 @@ def detect_stress_segments(df_work: pd.DataFrame, ts: pd.Series | None, vpd_col:
     ppfd = pd.to_numeric(df_work[ppfd_col], errors="coerce")
 
     # Convert hour-based windows to point counts based on step_seconds
-    # If step_seconds is None, default to hourly (3600s)
-    if step_seconds is None:
+    # If step_seconds is None or invalid, default to hourly (3600s)
+    if step_seconds is None or step_seconds <= 0:
         step_seconds = 3600.0
     
-    high_vpd_min_points = max(1, math.ceil(STRESS_WINDOWS["high_vpd_min_run"] * 3600 / step_seconds))
-    low_vpd_min_points = max(1, math.ceil(STRESS_WINDOWS["low_vpd_min_run"] * 3600 / step_seconds))
-    high_ppfd_min_points = max(1, math.ceil(STRESS_WINDOWS["high_ppfd_min_run"] * 3600 / step_seconds))
+    # Calculate conversion factor: points per hour
+    points_per_hour = 3600.0 / step_seconds
+    
+    high_vpd_min_points = max(1, math.ceil(STRESS_WINDOWS["high_vpd_min_run"] * points_per_hour))
+    low_vpd_min_points = max(1, math.ceil(STRESS_WINDOWS["low_vpd_min_run"] * points_per_hour))
+    high_ppfd_min_points = max(1, math.ceil(STRESS_WINDOWS["high_ppfd_min_run"] * points_per_hour))
 
     # High VPD stress (tipburn risk)
     high_vpd_cond = vpd > vpd_cfg["stress_high"]
