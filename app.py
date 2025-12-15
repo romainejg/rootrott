@@ -366,16 +366,6 @@ def render_calculators():
 
 def render_climate():
     st.markdown("## Climate")
-    st.markdown(
-        """
-        _Climate_ is about understanding how the environment behaves over time,
-        not just at single points.
-
-        Upload a climate log to explore VPD, PPFD and temperature patterns,
-        and see a climate type classification based on DLI.
-        """
-    )
-    st.markdown("---")
 
     tabs = st.tabs(["Climate Analyzer", "Feedback Loop Builder"])
 

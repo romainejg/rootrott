@@ -143,14 +143,15 @@ def infer_timestamp_column(df):
 
 def infer_env_columns(df):
     """
-    Infer VPD, PPFD, and Temperature columns using name matching + value range checks.
-    Returns dict with keys 'vpd', 'ppfd', 'temp', each containing:
+    Infer VPD, PPFD, Temperature, and RH columns using name matching + value range checks.
+    Returns dict with keys 'vpd', 'ppfd', 'temp', 'rh', each containing:
       {'col': name, 'score': confidence, 'explanation': why}
     """
     result = {
         'vpd': {'col': None, 'score': 0, 'explanation': ''},
         'ppfd': {'col': None, 'score': 0, 'explanation': ''},
-        'temp': {'col': None, 'score': 0, 'explanation': ''}
+        'temp': {'col': None, 'score': 0, 'explanation': ''},
+        'rh': {'col': None, 'score': 0, 'explanation': ''}
     }
     
     for col in df.columns:
@@ -183,10 +184,10 @@ def infer_env_columns(df):
                 'explanation': "; ".join(vpd_reasons)
             }
         
-        # PPFD detection
+        # PPFD/PAR/Light detection
         ppfd_score = 0
         ppfd_reasons = []
-        if any(keyword in col_lower for keyword in ['ppfd', 'par', 'light', 'photon']):
+        if any(keyword in col_lower for keyword in ['ppfd', 'par', 'light', 'photon', 'umol', 'µmol']):
             ppfd_score += 50
             ppfd_reasons.append(f"name matches 'PPFD/PAR/light'")
         
@@ -220,8 +221,65 @@ def infer_env_columns(df):
                 'score': temp_score,
                 'explanation': "; ".join(temp_reasons)
             }
+        
+        # RH detection
+        rh_score = 0
+        rh_reasons = []
+        if any(keyword in col_lower for keyword in ['rh', 'humidity', 'relative humidity', 'hum']):
+            rh_score += 50
+            rh_reasons.append("name matches 'RH/humidity'")
+        
+        # RH can be 0-1 (fraction) or 0-100 (percentage)
+        if (0 <= mean_val <= 1 and min_val >= 0 and max_val <= 1.2) or \
+           (0 <= mean_val <= 100 and min_val >= 0 and max_val <= 105):
+            rh_score += 30
+            rh_reasons.append(f"values in RH range (mean={mean_val:.1f})")
+        
+        if rh_score > result['rh']['score']:
+            result['rh'] = {
+                'col': col,
+                'score': rh_score,
+                'explanation': "; ".join(rh_reasons)
+            }
     
     return result
+
+
+def compute_vpd_from_temp_rh(temp_c: pd.Series, rh: pd.Series) -> pd.Series:
+    """
+    Compute VPD (kPa) from temperature (°C) and relative humidity.
+    Uses Magnus-Tetens formula for saturation vapor pressure.
+    
+    Args:
+        temp_c: Temperature in Celsius
+        rh: Relative humidity (0-1 or 0-100, will be normalized)
+    
+    Returns:
+        VPD in kPa
+    """
+    # Convert to numeric
+    temp = pd.to_numeric(temp_c, errors='coerce')
+    rh_vals = pd.to_numeric(rh, errors='coerce')
+    
+    # Normalize RH to 0-100 range
+    # If values are between 0-1, multiply by 100
+    if rh_vals.max() <= 1.2:  # Assume it's fractional
+        rh_vals = rh_vals * 100.0
+    
+    # Clamp RH to valid range
+    rh_vals = rh_vals.clip(0, 100)
+    
+    # Magnus-Tetens formula for saturation vapor pressure (kPa)
+    # es = 0.6108 * exp((17.27*T) / (T + 237.3))
+    es = 0.6108 * np.exp((17.27 * temp) / (temp + 237.3))
+    
+    # Actual vapor pressure
+    ea = es * (rh_vals / 100.0)
+    
+    # VPD = es - ea, but ensure non-negative
+    vpd = (es - ea).clip(lower=0)
+    
+    return vpd
 
 
 def infer_time_step_seconds(ts_series):
@@ -655,7 +713,7 @@ def classify_environment(vpd: dict, ppfd: dict, temp: dict, dli: dict):
     return env_label, tags
 
 
-def plot_time_series(timestamp, vpd, ppfd, temp, stress_segments):
+def plot_time_series(timestamp, vpd, ppfd, temp, stress_segments, light_label="PPFD (µmol m⁻² s⁻¹)"):
     """Create interactive Plotly time series with shaded stress periods."""
     # Shared x-axis
     fig = make_subplots(
@@ -663,7 +721,7 @@ def plot_time_series(timestamp, vpd, ppfd, temp, stress_segments):
         cols=1,
         shared_xaxes=True,
         vertical_spacing=0.03,
-        subplot_titles=("VPD", "PPFD", "Temperature"),
+        subplot_titles=("VPD", light_label.split("(")[0].strip(), "Temperature"),
     )
 
     x = timestamp if timestamp is not None else list(range(len(vpd)))
@@ -681,14 +739,14 @@ def plot_time_series(timestamp, vpd, ppfd, temp, stress_segments):
         col=1,
     )
 
-    # PPFD
+    # Light (PPFD or PAR)
     fig.add_trace(
         go.Scatter(
             x=x,
             y=pd.to_numeric(ppfd, errors="coerce"),
             mode="lines",
-            name="PPFD (µmol m⁻² s⁻¹)",
-            hovertemplate="Time: %{x}<br>PPFD: %{y:.0f} µmol m⁻² s⁻¹<extra></extra>",
+            name=light_label,
+            hovertemplate=f"Time: %{{x}}<br>{light_label}: %{{y:.0f}}<extra></extra>",
         ),
         row=2,
         col=1,
@@ -726,7 +784,7 @@ def plot_time_series(timestamp, vpd, ppfd, temp, stress_segments):
             )
 
     fig.update_yaxes(title_text="VPD (kPa)", row=1, col=1)
-    fig.update_yaxes(title_text="PPFD (µmol m⁻² s⁻¹)", row=2, col=1)
+    fig.update_yaxes(title_text=light_label, row=2, col=1)
     fig.update_yaxes(title_text="Temp (°C)", row=3, col=1)
 
     fig.update_xaxes(title_text="Time", row=3, col=1)
@@ -787,32 +845,12 @@ class ClimateAnalyzerUI:
 
         cols = list(df.columns.astype(str))
 
-        # Auto-detect timestamp column
-        ts_col_inferred, ts_confidence, ts_explanation = infer_timestamp_column(df)
-        
-        # Auto-detect environmental columns
+        # Auto-detect columns (silently)
+        ts_col_inferred, _, _ = infer_timestamp_column(df)
         env_cols = infer_env_columns(df)
 
-        st.markdown("#### Auto-detected columns")
-        
-        # Show detection results
-        detection_info = []
-        if ts_col_inferred:
-            detection_info.append(f"**Timestamp**: {ts_col_inferred} ({ts_confidence}% confidence - {ts_explanation})")
-        else:
-            detection_info.append(f"**Timestamp**: Not detected")
-        
-        for var_name, var_info in [('VPD', env_cols['vpd']), ('PPFD', env_cols['ppfd']), ('Temperature', env_cols['temp'])]:
-            if var_info['col']:
-                detection_info.append(f"**{var_name}**: {var_info['col']} ({var_info['score']}% confidence - {var_info['explanation']})")
-            else:
-                detection_info.append(f"**{var_name}**: Not detected")
-        
-        for info in detection_info:
-            st.markdown(f"- {info}")
-
         st.markdown("#### Column mapping")
-        st.caption("Review and adjust auto-detected columns if needed:")
+        st.caption("Review and adjust auto-selected columns:")
 
         c1, c2 = st.columns(2)
         with c1:
@@ -829,33 +867,6 @@ class ClimateAnalyzerUI:
                 index=ts_default_idx,
             )
 
-            # Pre-select VPD if detected
-            if env_cols['vpd']['col'] and env_cols['vpd']['col'] in cols:
-                vpd_default_idx = cols.index(env_cols['vpd']['col'])
-            else:
-                vpd_default_idx = 0
-            
-            vpd_col = st.selectbox(
-                "VPD column",
-                options=cols,
-                index=vpd_default_idx,
-                help="kPa",
-            )
-
-        with c2:
-            # Pre-select PPFD if detected
-            if env_cols['ppfd']['col'] and env_cols['ppfd']['col'] in cols:
-                ppfd_default_idx = cols.index(env_cols['ppfd']['col'])
-            else:
-                ppfd_default_idx = 0
-            
-            ppfd_col = st.selectbox(
-                "PPFD column",
-                options=cols,
-                index=ppfd_default_idx,
-                help="µmol m⁻² s⁻¹",
-            )
-
             # Pre-select Temperature if detected
             if env_cols['temp']['col'] and env_cols['temp']['col'] in cols:
                 temp_default_idx = cols.index(env_cols['temp']['col'])
@@ -867,6 +878,56 @@ class ClimateAnalyzerUI:
                 options=cols,
                 index=temp_default_idx,
                 help="°C",
+            )
+            
+            # Pre-select VPD if detected (optional now)
+            vpd_options = ["<none>"] + cols
+            if env_cols['vpd']['col'] and env_cols['vpd']['col'] in cols:
+                vpd_default_idx = vpd_options.index(env_cols['vpd']['col'])
+            else:
+                vpd_default_idx = 0
+            
+            vpd_col = st.selectbox(
+                "VPD column (optional if RH provided)",
+                options=vpd_options,
+                index=vpd_default_idx,
+                help="kPa - will be computed from Temperature + RH if not provided",
+            )
+
+        with c2:
+            # Pre-select Light column if detected
+            if env_cols['ppfd']['col'] and env_cols['ppfd']['col'] in cols:
+                light_default_idx = cols.index(env_cols['ppfd']['col'])
+            else:
+                light_default_idx = 0
+            
+            light_col = st.selectbox(
+                "Light column",
+                options=cols,
+                index=light_default_idx,
+                help="PPFD or PAR",
+            )
+            
+            # Light type selector
+            light_type = st.selectbox(
+                "Light type",
+                options=["PPFD", "PAR"],
+                index=0,
+                help="PPFD: Photosynthetic Photon Flux Density (µmol m⁻² s⁻¹) | PAR: Photosynthetically Active Radiation"
+            )
+            
+            # Pre-select RH if detected (optional)
+            rh_options = ["<none>"] + cols
+            if env_cols['rh']['col'] and env_cols['rh']['col'] in cols:
+                rh_default_idx = rh_options.index(env_cols['rh']['col'])
+            else:
+                rh_default_idx = 0
+            
+            rh_col = st.selectbox(
+                "Relative Humidity column (optional)",
+                options=rh_options,
+                index=rh_default_idx,
+                help="% RH - used to compute VPD if VPD column not provided",
             )
 
         # Optional analysis window if timestamp selected
@@ -941,8 +1002,10 @@ class ClimateAnalyzerUI:
                 df=df,
                 ts_series=ts_series if use_ts else None,
                 vpd_col=vpd_col,
-                ppfd_col=ppfd_col,
+                light_col=light_col,
+                light_type=light_type,
                 temp_col=temp_col,
+                rh_col=rh_col,
                 start_dt=start_dt,
                 end_dt=end_dt,
                 resolution=resolution,
@@ -950,9 +1013,32 @@ class ClimateAnalyzerUI:
             )
 
     @classmethod
-    def _run_analysis(cls, df, ts_series, vpd_col, ppfd_col, temp_col, start_dt, end_dt, resolution="Raw", step_seconds=None):
+    def _run_analysis(cls, df, ts_series, vpd_col, light_col, light_type, temp_col, rh_col, start_dt, end_dt, resolution="Raw", step_seconds=None):
         # Work on filtered copy
         df_work = df.copy()
+        
+        # Handle VPD computation if needed
+        use_vpd_col = vpd_col
+        if vpd_col == "<none>" or vpd_col not in df_work.columns:
+            # Try to compute VPD from temperature + RH
+            if rh_col != "<none>" and rh_col in df_work.columns and temp_col in df_work.columns:
+                try:
+                    df_work["_vpd_calc_"] = compute_vpd_from_temp_rh(df_work[temp_col], df_work[rh_col])
+                    use_vpd_col = "_vpd_calc_"
+                    st.info("VPD computed from Temperature and Relative Humidity.")
+                except Exception as e:
+                    st.warning(f"Could not compute VPD from Temperature and RH: {e}")
+                    st.warning("Please select a VPD column or provide both Temperature and RH columns.")
+                    return
+            else:
+                st.warning("VPD column not selected and cannot be computed. Please select a VPD column or provide both Temperature and RH columns.")
+                return
+        
+        # Determine light label based on type
+        if light_type == "PPFD":
+            light_label = "PPFD (µmol m⁻² s⁻¹)"
+        else:  # PAR
+            light_label = "PAR (µmol m⁻² s⁻¹)"
 
         if ts_series is not None:
             df_work["_ts_"] = ts_series
@@ -1005,19 +1091,23 @@ class ClimateAnalyzerUI:
         metrics_text = []
 
         # Analyze each variable
-        for label, col in [("VPD", vpd_col), ("PPFD", ppfd_col), ("Temperature", temp_col)]:
-            config = THRESHOLDS.get(label, {})
+        for label, col in [("VPD", use_vpd_col), (light_type, light_col), ("Temperature", temp_col)]:
+            config = THRESHOLDS.get(label if label in THRESHOLDS else "PPFD", {})
             m = analyze_series(df_work[col], label, config)
             results[label] = m
             metrics_text.append(cls._format_metrics(label, m, config))
 
-        # Compute DLI metrics from PPFD
-        dli_metrics = compute_dli_metrics(df_work[ppfd_col], ts_for_analysis, step_seconds)
+        # Compute DLI metrics from light column (only if appropriate)
+        # DLI is only valid for photon flux measurements (µmol m⁻² s⁻¹)
+        # For now, we compute it for both PPFD and PAR assuming they're in correct units
+        # In future, could add unit detection logic here
+        dli_metrics = compute_dli_metrics(df_work[light_col], ts_for_analysis, step_seconds)
 
-        # Classification
+        # Classification (use PPFD key for light data regardless of type)
+        light_results = results.get(light_type, {})
         env_type, tags = classify_environment(
             results.get("VPD", {}),
-            results.get("PPFD", {}),
+            light_results,  # Pass light results
             results.get("Temperature", {}),
             dli_metrics,
         )
@@ -1045,17 +1135,18 @@ class ClimateAnalyzerUI:
         stress_segments = detect_stress_segments(
             df_work,
             ts_for_analysis,
-            vpd_col=vpd_col,
-            ppfd_col=ppfd_col,
+            vpd_col=use_vpd_col,
+            ppfd_col=light_col,
             step_seconds=step_seconds,
         )
 
         fig = plot_time_series(
             timestamp=ts_for_analysis,
-            vpd=df_work[vpd_col],
-            ppfd=df_work[ppfd_col],
+            vpd=df_work[use_vpd_col],
+            ppfd=df_work[light_col],
             temp=df_work[temp_col],
             stress_segments=stress_segments,
+            light_label=light_label,
         )
 
         st.markdown("### Time series view")
