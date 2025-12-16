@@ -311,6 +311,17 @@ class CanopyClosureCalculator:
     - Optional variety/climate/stress modifiers
     - Multi-stage transplant support
     """
+    
+    # Variety speed multipliers (slower varieties take more days)
+    VARIETY_MULTIPLIERS = {
+        "Green (default)": 1.00,
+        "Red variety": 0.80,
+        "Romaine/Cos": 0.95
+    }
+    
+    # Climate and stress multipliers
+    CLIMATE_INCONSISTENT_MULT = 0.90
+    STRESS_MULT = 0.85
 
     @classmethod
     def render(cls):
@@ -404,7 +415,7 @@ class CanopyClosureCalculator:
             with mod1:
                 variety = st.selectbox(
                     "Variety",
-                    ["Green (default)", "Red variety", "Romaine/Cos"],
+                    list(cls.VARIETY_MULTIPLIERS.keys()),
                     index=0,
                     key="single_variety"
                 )
@@ -426,14 +437,9 @@ class CanopyClosureCalculator:
                 )
             
             # Compute speed multiplier
-            variety_mult = {
-                "Green (default)": 1.00,
-                "Red variety": 0.80,
-                "Romaine/Cos": 0.95
-            }[variety]
-            
-            climate_mult = 0.90 if inconsistent_climate else 1.00
-            stress_mult = 0.85 if known_stress else 1.00
+            variety_mult = cls.VARIETY_MULTIPLIERS[variety]
+            climate_mult = cls.CLIMATE_INCONSISTENT_MULT if inconsistent_climate else 1.00
+            stress_mult = cls.STRESS_MULT if known_stress else 1.00
             speed_multiplier = variety_mult * climate_mult * stress_mult
             
             # Compute results
@@ -627,7 +633,7 @@ class CanopyClosureCalculator:
             with mod1:
                 variety_multi = st.selectbox(
                     "Variety",
-                    ["Green (default)", "Red variety", "Romaine/Cos"],
+                    list(cls.VARIETY_MULTIPLIERS.keys()),
                     index=0,
                     key="multi_variety"
                 )
@@ -647,14 +653,9 @@ class CanopyClosureCalculator:
                 )
             
             # Compute speed multiplier
-            variety_mult_multi = {
-                "Green (default)": 1.00,
-                "Red variety": 0.80,
-                "Romaine/Cos": 0.95
-            }[variety_multi]
-            
-            climate_mult_multi = 0.90 if inconsistent_climate_multi else 1.00
-            stress_mult_multi = 0.85 if known_stress_multi else 1.00
+            variety_mult_multi = cls.VARIETY_MULTIPLIERS[variety_multi]
+            climate_mult_multi = cls.CLIMATE_INCONSISTENT_MULT if inconsistent_climate_multi else 1.00
+            stress_mult_multi = cls.STRESS_MULT if known_stress_multi else 1.00
             speed_multiplier_multi = variety_mult_multi * climate_mult_multi * stress_mult_multi
             
             # Stage inputs

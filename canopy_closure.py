@@ -41,8 +41,8 @@ def compute_pdi(T, DLI, CO2, VPD):
     Quick checks at standard env (23, 18, 800, 0.8):
         PDI should be ~1.0
     """
-    # Protect against division by zero
-    if DLI_REF <= 0 or CO2_REF <= 0 or VPD_REF <= 0:
+    # Protect against invalid inputs
+    if DLI <= 0 or CO2 <= 0 or VPD <= 0:
         return 0.0, 0.0
     
     # Light term: weighted combination of DLI and CO2
@@ -120,6 +120,13 @@ def t90_anchor_from_density(D):
     return float(t90)
 
 
+# Density buffering parameters
+# These control how sensitive the model is to environment at different densities
+ALPHA_MIN = 0.09      # Minimum alpha at very high density (minimal PDI sensitivity)
+ALPHA_RANGE = 0.66    # Range of alpha variation from min to max
+DENSITY_HALF = 150.0  # Density at which alpha is halfway between min and max
+
+
 def alpha_from_density(D):
     """
     Compute density buffering factor alpha(D).
@@ -134,7 +141,7 @@ def alpha_from_density(D):
     Returns:
         float: Buffering factor alpha
     """
-    alpha = 0.09 + 0.66 / (1 + (D / 150) ** 2)
+    alpha = ALPHA_MIN + ALPHA_RANGE / (1 + (D / DENSITY_HALF) ** 2)
     return float(alpha)
 
 
@@ -311,12 +318,10 @@ def canopy_days_multistage(stages, T, DLI, CO2, VPD, target_pct=90.0, speed_mult
             if current_closure >= target_pct:
                 actual_days = 0.0
             else:
-                # Solve: current_closure + 100*(1-exp(-k*t)) = target
-                # But we need to account for starting point
-                # If starting at current_closure%, we need additional coverage
+                # Approximate calculation: assumes closures combine multiplicatively
+                # This is a simplification that works well when stages don't overlap heavily
+                # Limitation: May underestimate slightly when transitioning between very different densities
                 remaining = (target_pct - current_closure) / 100.0
-                # This is approximate; exact formula depends on combining closures
-                # For simplicity: assume additive in the exponential space
                 if remaining <= 0:
                     actual_days = 0.0
                 else:
@@ -331,7 +336,9 @@ def canopy_days_multistage(stages, T, DLI, CO2, VPD, target_pct=90.0, speed_mult
         if actual_days > 0:
             # New closure from this stage
             stage_closure = 100 * (1 - np.exp(-k * actual_days))
-            # Combine with current (simplified: additive up to 100)
+            # Combine with current closure using multiplicative approach
+            # Formula: new_closure = current + stage_closure * (1 - current/100)
+            # This accounts for diminishing returns as canopy fills in
             new_closure = min(100.0, current_closure + stage_closure * (1 - current_closure/100.0))
         else:
             new_closure = current_closure
