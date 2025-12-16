@@ -1,5 +1,8 @@
 import streamlit as st
 import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import canopy_closure as cc
 
 
 class DLICalculator:
@@ -298,255 +301,483 @@ class GutterPlantDensityCalculator:
 
 class CanopyClosureCalculator:
     """
-    Estimate days until canopy closure based on:
-    - Plant density (plants/m²)
-    - Average air temperature (°C)
-    - Average PPFD during the photoperiod (µmol·m⁻²·s⁻¹)
-    - Photoperiod length (hours of light per day)
-
-    This is a simple, crop-agnostic toy model mainly tuned for leafy crops,
-    but it accepts densities up to 2000 plants/m² and lets you factor in:
-
-    - Germination time (hours from sowing to emergence)
-    - Transplant offset (days from sowing until plants enter this environment)
-
-    The climate you enter is assumed to describe conditions **after transplant**.
+    Canopy Closure Estimator based on calibrated density anchor + normalized PDI 
+    with density buffering and optional demerit modifiers.
+    
+    Model features:
+    - Normalized PDI from environmental averages (T, DLI, CO2, VPD)
+    - Calibrated anchor points at standard environment
+    - Density buffering (high density less sensitive to environment)
+    - Optional variety/climate/stress modifiers
+    - Multi-stage transplant support
     """
-
-    # Target leaf area index (LAI) at which we say "canopy closed"
-    BASE_LAI_TARGET = 3.0  # typical "closed" canopy for leafy crops
-
-    # Reference density for saturation behaviour
-    DENSITY_REF = 25.0  # plants/m² (around typical leafy spacing)
-
-    # Leaf area produced per plant per mol DLI at reference temp (20 °C)
-    # Tuned so that: ~25 plants/m², ~15 mol DLI, ~20 °C  => ≈ 18 days to closure
-    ALPHA_LEAF_PER_DLI = 4.5e-4  # m² leaf / plant / mol DLI
-
-    @staticmethod
-    def temp_factor(temp_c: float) -> float:
-        """
-        Simple temperature response factor around 20 °C.
-        ~4% change in growth rate per °C, clipped to a reasonable range.
-        """
-        factor = 1.0 + 0.04 * (temp_c - 20.0)
-        # Avoid silly extremes
-        return float(np.clip(factor, 0.4, 1.6))
-
-    @classmethod
-    def density_factor(cls, density_plants_m2: float) -> float:
-        """
-        Saturating density response:
-        - ~linear at low density
-        - approaches 1.5× reference effect at very high density
-
-        This avoids the unrealistic 1/density behaviour where doubling
-        density always halves days.
-        """
-        if density_plants_m2 <= 0:
-            return 0.0
-
-        x = density_plants_m2 / cls.DENSITY_REF
-        # Smooth saturation using tanh
-        base = np.tanh(x) / np.tanh(1.0)  # ~1 at reference density
-        return float(np.clip(base, 0.1, 1.5))
-
-    @classmethod
-    def compute_days_to_closure(
-        cls,
-        density_plants_m2: float,
-        temp_c: float,
-        ppfd: float,
-        photoperiod_h: float = 16.0,
-    ) -> float:
-        """
-        Estimate days from **transplant** under this environment
-        until canopy closure.
-
-        Conceptual model:
-        - DLI controls daily carbon / leaf production
-        - Temperature scales the biochemical rate (temp_factor)
-        - Density scales how many leaves per m² can be produced,
-          but with a saturation at high density.
-
-        Steps:
-        - DLI = f(PPFD, photoperiod)
-        - Effective density factor = f(density)
-        - Daily LAI gain per m² = DENSITY_REF * alpha * DLI * temp_factor * density_factor
-        - Days = LAI_target / daily_LAI_gain
-        """
-        if (
-            density_plants_m2 <= 0
-            or temp_c <= -20  # sanity
-            or ppfd <= 0
-            or photoperiod_h <= 0
-        ):
-            return np.nan
-
-        # Convert PPFD + photoperiod -> DLI (mol·m⁻²·day⁻¹)
-        dli = DLICalculator.compute_dli(ppfd, photoperiod_h)
-        if dli <= 0:
-            return np.nan
-
-        fT = cls.temp_factor(temp_c)
-        fN = cls.density_factor(density_plants_m2)
-        lai_target = cls.BASE_LAI_TARGET
-        alpha = cls.ALPHA_LEAF_PER_DLI
-
-        # Daily LAI gain per m² ground
-        daily_lai_gain = cls.DENSITY_REF * alpha * dli * fT * fN
-        if daily_lai_gain <= 0:
-            return np.nan
-
-        days = lai_target / daily_lai_gain
-        return float(days)
+    
+    # Variety speed multipliers (slower varieties take more days)
+    VARIETY_MULTIPLIERS = {
+        "Green (default)": 1.00,
+        "Red variety": 0.80,
+        "Romaine/Cos": 0.95
+    }
+    
+    # Climate and stress multipliers
+    CLIMATE_INCONSISTENT_MULT = 0.90
+    STRESS_MULT = 0.85
 
     @classmethod
     def render(cls):
-        st.subheader("Canopy Closure (Days to Close)")
-
+        st.subheader("Canopy Closure Estimator")
+        
         st.markdown(
             """
-            Rough estimate of **how many days** it takes a crop to reach canopy closure
-            (LAI ≈ 3) based on:
-
-            - **Plant density** (plants per m²)  
-            - **Average air temperature** (°C)  
-            - **Average PPFD during the light period** (µmol·m⁻²·s⁻¹)  
-            - **Photoperiod** (hours of light per day)  
-
-            You can also include:
-
-            - **Germination time** (hours from sowing to emergence)  
-            - **Transplant offset** (days from sowing until plants enter this environment)  
-
-            The climate you enter is assumed to describe conditions **after transplant**.
+            **⚠️ This tool is still under construction** but provides estimates based on:
+            
+            - **Plant density** (plants/m²)
+            - **Environmental averages**: Temperature, DLI, CO2, VPD
+            - **Target closure %** (default 90%)
+            - **Optional modifiers**: variety, climate consistency, stress periods
+            - **Optional transplant stages**: multiple density stages if needed
+            
+            The model uses a calibrated anchor approach with density buffering, meaning high 
+            densities (≥600 plants/m²) are less sensitive to environmental changes, while low 
+            densities show more environmental sensitivity.
             """
         )
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            density = st.number_input(
-                "Plant density (plants/m²)",
-                min_value=1.0,
-                max_value=2000.0,   # 👈 up to 2000 plants/m²
-                value=25.0,
-                step=1.0,
+        
+        # Create tabs for single-stage vs multi-stage
+        mode_tabs = st.tabs(["Single Stage", "Multi-Stage (Transplants)"])
+        
+        # ===== SINGLE STAGE MODE =====
+        with mode_tabs[0]:
+            st.markdown("### Environmental Inputs")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                density = st.number_input(
+                    "Density (plants/m²)",
+                    min_value=1.0,
+                    max_value=2000.0,
+                    value=600.0,
+                    step=10.0,
+                    key="single_density"
+                )
+                
+                temp = st.number_input(
+                    "Avg Temperature (°C)",
+                    min_value=-10.0,
+                    max_value=45.0,
+                    value=23.0,
+                    step=0.5,
+                    key="single_temp"
+                )
+                
+                dli = st.number_input(
+                    "Avg DLI (mol m⁻² d⁻¹)",
+                    min_value=0.1,
+                    max_value=60.0,
+                    value=18.0,
+                    step=0.5,
+                    key="single_dli"
+                )
+            
+            with col2:
+                co2 = st.number_input(
+                    "Avg CO2 (ppm)",
+                    min_value=300.0,
+                    max_value=2000.0,
+                    value=800.0,
+                    step=50.0,
+                    key="single_co2"
+                )
+                
+                vpd = st.number_input(
+                    "Avg VPD (kPa)",
+                    min_value=0.1,
+                    max_value=3.0,
+                    value=0.8,
+                    step=0.1,
+                    key="single_vpd"
+                )
+                
+                target_pct = st.number_input(
+                    "Target Closure (%)",
+                    min_value=10.0,
+                    max_value=99.0,
+                    value=90.0,
+                    step=5.0,
+                    key="single_target"
+                )
+            
+            st.markdown("### Modifiers (Optional)")
+            
+            mod1, mod2, mod3 = st.columns(3)
+            
+            with mod1:
+                variety = st.selectbox(
+                    "Variety",
+                    list(cls.VARIETY_MULTIPLIERS.keys()),
+                    index=0,
+                    key="single_variety"
+                )
+            
+            with mod2:
+                inconsistent_climate = st.checkbox(
+                    "Inconsistent climate",
+                    value=False,
+                    help="Check if climate conditions are inconsistent (10% slower)",
+                    key="single_climate"
+                )
+            
+            with mod3:
+                known_stress = st.checkbox(
+                    "Known stress period",
+                    value=False,
+                    help="Check if there's a known stress period (15% slower)",
+                    key="single_stress"
+                )
+            
+            # Compute speed multiplier
+            variety_mult = cls.VARIETY_MULTIPLIERS[variety]
+            climate_mult = cls.CLIMATE_INCONSISTENT_MULT if inconsistent_climate else 1.00
+            stress_mult = cls.STRESS_MULT if known_stress else 1.00
+            speed_multiplier = variety_mult * climate_mult * stress_mult
+            
+            # Compute results
+            result = cc.canopy_days_to_target(
+                D=density,
+                T=temp,
+                DLI=dli,
+                CO2=co2,
+                VPD=vpd,
+                target_pct=target_pct,
+                speed_mult=speed_multiplier
             )
-
-            ppfd = st.number_input(
-                "Average PPFD during photoperiod (µmol·m⁻²·s⁻¹)",
-                min_value=0.0,
-                max_value=3000.0,
-                value=220.0,
-                step=10.0,
+            
+            # Display results
+            st.markdown("### Results")
+            
+            res1, res2, res3 = st.columns(3)
+            
+            with res1:
+                st.metric("PDI (raw)", f"{result['pdi_raw']:.3f}")
+                st.metric("PDI (clipped)", f"{result['pdi']:.3f}")
+            
+            with res2:
+                st.metric("t90 anchor (days)", f"{result['t90_anchor']:.1f}")
+                st.metric("Alpha (buffering)", f"{result['alpha']:.3f}")
+            
+            with res3:
+                st.metric("Speed multiplier", f"{result['speed_multiplier']:.2f}")
+                st.metric("Effective t90 (days)", f"{result['effective_t90']:.1f}")
+            
+            st.markdown("---")
+            
+            st.markdown(f"### **Days to {target_pct:.0f}% Closure: {result['t_target']:.1f} days**")
+            
+            # Generate and plot curve
+            curve_data = cc.closure_curve(
+                t90=result['effective_t90'],
+                target_pct=target_pct
             )
-
-        with col2:
-            temp_c = st.number_input(
-                "Average air temperature (°C)",
-                min_value=0.0,
-                max_value=35.0,
-                value=20.0,
-                step=0.5,
+            
+            fig = go.Figure()
+            
+            # Main curve
+            fig.add_trace(go.Scatter(
+                x=curve_data['day'],
+                y=curve_data['closure_pct'],
+                mode='lines',
+                name='Closure %',
+                line=dict(color='#45C96B', width=3)
+            ))
+            
+            # Target line
+            fig.add_hline(
+                y=target_pct,
+                line_dash="dash",
+                line_color="gray",
+                annotation_text=f"Target: {target_pct:.0f}%",
+                annotation_position="right"
             )
-
-            photoperiod_h = st.number_input(
-                "Photoperiod (hours of light per day)",
-                min_value=0.0,
-                max_value=24.0,
-                value=16.0,
-                step=0.5,
+            
+            # Target point
+            fig.add_trace(go.Scatter(
+                x=[result['t_target']],
+                y=[target_pct],
+                mode='markers',
+                name=f'{target_pct:.0f}% closure',
+                marker=dict(size=10, color='#ED695D')
+            ))
+            
+            # 90% reference if different from target
+            if abs(target_pct - 90.0) > 1.0:
+                fig.add_trace(go.Scatter(
+                    x=[result['effective_t90']],
+                    y=[90.0],
+                    mode='markers',
+                    name='90% closure (ref)',
+                    marker=dict(size=8, color='#8C8BFF', symbol='diamond')
+                ))
+            
+            fig.update_layout(
+                title=f"Canopy Closure Curve (Density: {density:.0f} plants/m²)",
+                xaxis_title="Days",
+                yaxis_title="Canopy Closure (%)",
+                hovermode='x unified',
+                height=450
             )
-
-        st.markdown("#### Propagation & timing")
-
-        g1, g2 = st.columns(2)
-        with g1:
-            germ_hours = st.number_input(
-                "Germination time (hours from sowing to emergence)",
-                min_value=0.0,
-                max_value=240.0,
-                value=72.0,
-                step=6.0,
-                help="If you don't care about sowing → closure, set to 0.",
-            )
-        with g2:
-            transplant_offset_days = st.number_input(
-                "Transplant offset (days from sowing until plants are in this environment)",
-                min_value=0.0,
-                max_value=60.0,
-                value=0.0,
-                step=1.0,
-                help="Use this for plug / nursery phase before this climate applies.",
-            )
-
-        # Core prediction
-        days_after_transplant = cls.compute_days_to_closure(
-            density_plants_m2=density,
-            temp_c=temp_c,
-            ppfd=ppfd,
-            photoperiod_h=photoperiod_h,
-        )
-        dli = DLICalculator.compute_dli(ppfd, photoperiod_h)
-
-        if np.isnan(days_after_transplant):
-            st.info(
-                "Enter non-zero values for density, PPFD and photoperiod "
-                "to see an estimate."
-            )
-            return
-
-        germ_days = germ_hours / 24.0
-        total_days_from_sowing = germ_days + transplant_offset_days + days_after_transplant
-
-        st.markdown("### Results")
-
-        st.write(
-            f"- From **transplant under this climate** to canopy closure: "
-            f"**{days_after_transplant:.1f} days**"
-        )
-        st.write(
-            f"- **Total from sowing to canopy closure** "
-            f"(germination + transplant offset + this climate): "
-            f"**{total_days_from_sowing:.1f} days**"
-        )
-
-        st.write(
-            f"- Germination assumed: **{germ_hours:.0f} hours** "
-            f"(~{germ_days:.1f} days)"
-        )
-        if transplant_offset_days > 0:
-            st.write(
-                f"- Transplant offset (nursery / plug phase): "
-                f"**{transplant_offset_days:.1f} days**"
-            )
-
-        st.write(f"- Implied DLI: **{dli:.2f} mol·m⁻²·day⁻¹**")
-
-        with st.expander("What this estimate assumes", expanded=False):
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Show intermediate calculations
+            with st.expander("Show intermediate calculations", expanded=False):
+                st.markdown(f"""
+                **Step 1: Normalized PDI**
+                - Standard env: T={cc.T_REF}°C, DLI={cc.DLI_REF}, CO2={cc.CO2_REF}ppm, VPD={cc.VPD_REF}kPa
+                - Your env: T={temp}°C, DLI={dli}, CO2={co2}ppm, VPD={vpd}kPa
+                - PDI raw: {result['pdi_raw']:.3f}
+                - PDI clipped [0.70, 1.30]: {result['pdi']:.3f}
+                
+                **Step 2: Density anchor at PDI=1**
+                - Density: {density:.0f} plants/m²
+                - t90_anchor: {result['t90_anchor']:.1f} days (days to 90% at standard env)
+                
+                **Step 3: Density buffering**
+                - Alpha: {result['alpha']:.3f} (sensitivity to environment)
+                - Higher density → lower alpha → less sensitive
+                
+                **Step 4: Environment adjustment**
+                - t90 = t90_anchor × PDI^(-alpha)
+                - t90 = {result['t90_anchor']:.1f} × {result['pdi']:.3f}^(-{result['alpha']:.3f})
+                - t90 = {result['t90']:.1f} days
+                
+                **Step 5: Modifiers**
+                - Variety: {variety} → {variety_mult:.2f}
+                - Climate: {"Inconsistent" if inconsistent_climate else "Consistent"} → {climate_mult:.2f}
+                - Stress: {"Yes" if known_stress else "No"} → {stress_mult:.2f}
+                - Combined: {speed_multiplier:.2f}
+                - Effective t90 = {result['t90']:.1f} / {speed_multiplier:.2f} = {result['effective_t90']:.1f} days
+                
+                **Step 6: Target closure**
+                - Growth constant k = ln(10) / t90 = {result['k']:.4f}
+                - Days to {target_pct:.0f}%: {result['t_target']:.1f} days
+                """)
+        
+        # ===== MULTI-STAGE MODE =====
+        with mode_tabs[1]:
+            st.markdown("### Multi-Stage Transplant Mode")
             st.markdown(
-                f"""
-                - Target canopy: **LAI ≈ {cls.BASE_LAI_TARGET:.1f}**  
-                - Daily leaf area gain scales with:
-                    - **DLI** (more light → faster closure)  
-                    - **Temperature** (via a simple response around 20 °C)  
-                    - **Density** (more plants per m² → faster closure, but with saturation)  
-                - Reference tuning: ~**{cls.DENSITY_REF:.0f} plants/m²**, **15 mol·m⁻²·day⁻¹**, **20°C** ⇒ ~**18 days** to closure  
-
-                Timing logic:
-                - Model predicts **days from transplant under this climate** to closure  
-                - Total time from sowing adds:
-                    - Germination time (hours → days)  
-                    - Optional transplant offset (days before plants see this climate)  
-
-                Best used as a **relative tool**:
-                - Compare different densities (up to 2000 plants/m²)  
-                - Explore effects of light level, photoperiod and temperature  
-                - Put climate strategies on a simple sowing → closure timeline  
+                """
+                Use this mode when you have multiple transplant stages at different densities.
+                For example: plug stage → first transplant → final spacing.
                 """
             )
+            
+            # Environment inputs (shared for all stages)
+            st.markdown("#### Environmental Conditions (applies to all stages)")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                temp_multi = st.number_input(
+                    "Avg Temperature (°C)",
+                    min_value=-10.0,
+                    max_value=45.0,
+                    value=23.0,
+                    step=0.5,
+                    key="multi_temp"
+                )
+                
+                dli_multi = st.number_input(
+                    "Avg DLI (mol m⁻² d⁻¹)",
+                    min_value=0.1,
+                    max_value=60.0,
+                    value=18.0,
+                    step=0.5,
+                    key="multi_dli"
+                )
+            
+            with col2:
+                co2_multi = st.number_input(
+                    "Avg CO2 (ppm)",
+                    min_value=300.0,
+                    max_value=2000.0,
+                    value=800.0,
+                    step=50.0,
+                    key="multi_co2"
+                )
+                
+                vpd_multi = st.number_input(
+                    "Avg VPD (kPa)",
+                    min_value=0.1,
+                    max_value=3.0,
+                    value=0.8,
+                    step=0.1,
+                    key="multi_vpd"
+                )
+            
+            target_pct_multi = st.number_input(
+                "Target Closure (%)",
+                min_value=10.0,
+                max_value=99.0,
+                value=90.0,
+                step=5.0,
+                key="multi_target"
+            )
+            
+            # Modifiers
+            st.markdown("#### Modifiers")
+            
+            mod1, mod2, mod3 = st.columns(3)
+            
+            with mod1:
+                variety_multi = st.selectbox(
+                    "Variety",
+                    list(cls.VARIETY_MULTIPLIERS.keys()),
+                    index=0,
+                    key="multi_variety"
+                )
+            
+            with mod2:
+                inconsistent_climate_multi = st.checkbox(
+                    "Inconsistent climate",
+                    value=False,
+                    key="multi_climate"
+                )
+            
+            with mod3:
+                known_stress_multi = st.checkbox(
+                    "Known stress period",
+                    value=False,
+                    key="multi_stress"
+                )
+            
+            # Compute speed multiplier
+            variety_mult_multi = cls.VARIETY_MULTIPLIERS[variety_multi]
+            climate_mult_multi = cls.CLIMATE_INCONSISTENT_MULT if inconsistent_climate_multi else 1.00
+            stress_mult_multi = cls.STRESS_MULT if known_stress_multi else 1.00
+            speed_multiplier_multi = variety_mult_multi * climate_mult_multi * stress_mult_multi
+            
+            # Stage inputs
+            st.markdown("#### Transplant Stages")
+            st.markdown("Define each stage with density and days. Last stage goes until target closure.")
+            
+            num_stages = st.number_input(
+                "Number of stages",
+                min_value=1,
+                max_value=5,
+                value=2,
+                step=1,
+                key="num_stages"
+            )
+            
+            stages = []
+            for i in range(num_stages):
+                st.markdown(f"**Stage {i+1}**")
+                c1, c2 = st.columns(2)
+                
+                with c1:
+                    stage_density = st.number_input(
+                        f"Density (plants/m²)",
+                        min_value=1.0,
+                        max_value=2000.0,
+                        value=1200.0 if i == 0 else (600.0 if i == 1 else 350.0),
+                        step=10.0,
+                        key=f"stage_{i}_density"
+                    )
+                
+                with c2:
+                    if i < num_stages - 1:
+                        stage_days = st.number_input(
+                            f"Days at this stage",
+                            min_value=0.0,
+                            max_value=100.0,
+                            value=7.0 if i == 0 else 14.0,
+                            step=1.0,
+                            key=f"stage_{i}_days"
+                        )
+                    else:
+                        st.markdown("**(Final stage: until target)**")
+                        stage_days = None
+                
+                stages.append((stage_density, stage_days))
+            
+            # Compute multi-stage results
+            multi_result = cc.canopy_days_multistage(
+                stages=stages,
+                T=temp_multi,
+                DLI=dli_multi,
+                CO2=co2_multi,
+                VPD=vpd_multi,
+                target_pct=target_pct_multi,
+                speed_mult=speed_multiplier_multi
+            )
+            
+            # Display results
+            st.markdown("### Results")
+            
+            st.markdown(f"### **Total Days to {target_pct_multi:.0f}% Closure: {multi_result['total_days']:.1f} days**")
+            st.markdown(f"**Final Closure: {multi_result['final_closure_pct']:.1f}%**")
+            
+            st.markdown("#### Stage Breakdown")
+            
+            # Create table of stages
+            stage_table = []
+            for stage_info in multi_result['stages_info']:
+                stage_table.append({
+                    'Stage': stage_info['stage'],
+                    'Density (plants/m²)': f"{stage_info['density']:.0f}",
+                    'Days': f"{stage_info['days']:.1f}",
+                    'Closure Start (%)': f"{stage_info['closure_start']:.1f}",
+                    'Closure End (%)': f"{stage_info['closure_end']:.1f}",
+                    'Cumulative Days': f"{stage_info['cumulative_days']:.1f}"
+                })
+            
+            st.dataframe(pd.DataFrame(stage_table), use_container_width=True)
+            
+            # Plot multi-stage curve
+            fig_multi = go.Figure()
+            
+            for stage_info in multi_result['stages_info']:
+                days_start = stage_info['cumulative_days'] - stage_info['days']
+                days_end = stage_info['cumulative_days']
+                
+                # Generate curve for this stage
+                k = stage_info['k']
+                days_range = np.linspace(0, stage_info['days'], 50)
+                closure_base = 100 * (1 - np.exp(-k * days_range))
+                
+                # Adjust for starting point
+                closure_adjusted = stage_info['closure_start'] + \
+                                 closure_base * (1 - stage_info['closure_start']/100.0)
+                days_absolute = days_start + days_range
+                
+                fig_multi.add_trace(go.Scatter(
+                    x=days_absolute,
+                    y=closure_adjusted,
+                    mode='lines',
+                    name=f'Stage {stage_info["stage"]} (D={stage_info["density"]:.0f})',
+                    line=dict(width=3)
+                ))
+            
+            # Target line
+            fig_multi.add_hline(
+                y=target_pct_multi,
+                line_dash="dash",
+                line_color="gray",
+                annotation_text=f"Target: {target_pct_multi:.0f}%",
+                annotation_position="right"
+            )
+            
+            fig_multi.update_layout(
+                title="Multi-Stage Canopy Closure",
+                xaxis_title="Days",
+                yaxis_title="Canopy Closure (%)",
+                hovermode='x unified',
+                height=450
+            )
+            
+            st.plotly_chart(fig_multi, use_container_width=True)
 
 
 class UnitConverterCalculator:
